@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pkl
+*.log
+
+# Virtual envs
+.env
+.venv
+venv/
+ENV/
+env/
+*.envrc
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Playwright / browser profiles
+playwright-report/
+test-results/
+playwright/.cache/
+whatsapp_profile/
+*profile*/  # any other local browser profile dirs you create
+
+# Local databases and data
+*.db
+*.sqlite
+*.sqlite3
+data/
+logs/
+
+# App-specific config
+config.local.json
+*.local.yaml
+*.local.yml
