@@ -1,0 +1,217 @@
+import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+import pyodbc
+import decimal
+
+# DB Config
+PG_USER = "openpg"
+PG_PWD = "openpgpwd"
+PG_HOST = "localhost"
+PG_PORT = 5432
+
+MSSQL_CONN_STR = (
+    "DRIVER={ODBC Driver 18 for SQL Server};"
+    "SERVER=your_sql_server_ip,port;"
+    "DATABASE=ColinasProducts;"
+    "UID=your_sql_username;"
+    "PWD=***REMOVED***;"
+    "Encrypt=yes;"
+    "TrustServerCertificate=yes;"
+)
+
+def create_db_if_not_exists():
+    print("Connecting to default PostgreSQL database to check/create whatsapp_orders database...")
+    conn = psycopg2.connect(
+        host=PG_HOST,
+        port=PG_PORT,
+        user=PG_USER,
+        password=PG_PWD,
+        database="postgres"
+    )
+    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM pg_database WHERE datname = 'whatsapp_orders'")
+    exists = cur.fetchone()
+    if not exists:
+        print("Creating database 'whatsapp_orders'...")
+        cur.execute("CREATE DATABASE whatsapp_orders")
+    else:
+        print("Database 'whatsapp_orders' already exists.")
+    cur.close()
+    conn.close()
+
+def create_tables(conn):
+    print("Creating tables if they do not exist...")
+    cur = conn.cursor()
+    
+    # customers table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS customers (
+        id INT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        company VARCHAR(255),
+        phone VARCHAR(100),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+    
+    # products table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS products (
+        id INT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        sku VARCHAR(100) UNIQUE NOT NULL,
+        description TEXT,
+        price NUMERIC(10, 2) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+    
+    # orders table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS orders (
+        id SERIAL PRIMARY KEY,
+        customer_id INT REFERENCES customers(id),
+        product_id INT REFERENCES products(id),
+        quantity NUMERIC(10, 2),
+        raw_message TEXT NOT NULL,
+        source VARCHAR(50) NOT NULL DEFAULT 'whatsapp',
+        status VARCHAR(50) NOT NULL DEFAULT 'pending_review',
+        special_instructions TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        needs_review BOOLEAN NOT NULL DEFAULT TRUE
+    );
+    """)
+    
+    conn.commit()
+    cur.close()
+
+def sync_data(pg_conn):
+    print("Connecting to remote SQL Server...")
+    ms_conn = pyodbc.connect(MSSQL_CONN_STR, timeout=5)
+    ms_cur = ms_conn.cursor()
+    
+    # 1. Fetch Customers
+    print("Syncing Customers...")
+    ms_cur.execute("""
+        SELECT CustomerID, CustomerName, Phone 
+        FROM Tbl_Sales_Customers 
+        WHERE Inactive = 0
+    """)
+    customers = ms_cur.fetchall()
+    
+    pg_cur = pg_conn.cursor()
+    # Delete existing to resync cleanly
+    pg_cur.execute("DELETE FROM orders WHERE source = 'sales_order'")
+    pg_cur.execute("TRUNCATE customers CASCADE")
+    
+    count_cust = 0
+    for row in customers:
+        cid, name, phone = row
+        if not name:
+            name = f"Customer #{cid}"
+        phone = phone.strip() if phone else ""
+        # Let's clean phone (keep letters, digits, spaces, hyphens)
+        # Check if exists
+        pg_cur.execute(
+            "INSERT INTO customers (id, name, company, phone) VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+            (cid, name, name, phone)
+        )
+        count_cust += 1
+    print(f"Synced {count_cust} customers.")
+    
+    # 2. Fetch Products
+    print("Syncing Products...")
+    pg_cur.execute("TRUNCATE products CASCADE")
+    
+    ms_cur.execute("""
+    SELECT 
+      m.MaterialID, 
+      m.PartNo, 
+      m.MaterialDescription, 
+      m.UM, 
+      COALESCE(
+        (SELECT TOP 1 sod.UnitPrice 
+         FROM Tbl_Sales_SalesOrder_Details sod 
+         WHERE sod.MaterialID = m.MaterialID 
+         ORDER BY sod.SalesOrderDetailID DESC), 
+        10.00
+      ) AS Price
+    FROM Tbl_WH_Materials m
+    WHERE m.Inactive = 0
+    """)
+    products = ms_cur.fetchall()
+    
+    count_prod = 0
+    for row in products:
+        pid, sku, name, um, price = row
+        if not name:
+            name = f"Material #{pid}"
+        if not sku:
+            sku = f"SKU-{pid}"
+        price_val = float(price) if price is not None else 10.00
+        if price_val <= 0:
+            price_val = 10.00 # fallback
+        
+        # Insert or update
+        pg_cur.execute(
+            "INSERT INTO products (id, name, sku, description, price) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+            (pid, name, sku, f"UM: {um}", price_val)
+        )
+        count_prod += 1
+    print(f"Synced {count_prod} products.")
+    
+    # 3. Fetch recent orders to seed history
+    print("Syncing Order History...")
+    ms_cur.execute("""
+    SELECT TOP 1500
+      so.CustomerID,
+      sod.MaterialID,
+      sod.Quantity,
+      so.DateIssued,
+      sod.Notes
+    FROM Tbl_Sales_SalesOrder_Details sod
+    JOIN Tbl_Sales_SalesOrder so ON sod.SalesOrderID = so.SalesOrderID
+    WHERE so.CustomerID IN (SELECT CustomerID FROM Tbl_Sales_Customers WHERE Inactive = 0)
+      AND sod.MaterialID IN (SELECT MaterialID FROM Tbl_WH_Materials WHERE Inactive = 0)
+    ORDER BY so.SalesOrderID DESC
+    """)
+    orders = ms_cur.fetchall()
+    
+    count_ord = 0
+    for row in orders:
+        cid, pid, qty, date_issued, notes = row
+        qty_val = float(qty) if qty else 1.0
+        special_instr = notes if notes else ""
+        date_val = date_issued if date_issued else "NOW()"
+        
+        pg_cur.execute(
+            """
+            INSERT INTO orders (customer_id, product_id, quantity, raw_message, source, status, special_instructions, created_at, needs_review)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (cid, pid, qty_val, "Imported from historical sales orders", "sales_order", "completed", special_instr, date_val, False)
+        )
+        count_ord += 1
+        
+    print(f"Synced {count_ord} historical order items.")
+    pg_conn.commit()
+    pg_cur.close()
+    ms_cur.close()
+    ms_conn.close()
+
+if __name__ == "__main__":
+    create_db_if_not_exists()
+    
+    # Connect to whatsapp_orders database
+    conn = psycopg2.connect(
+        host=PG_HOST,
+        port=PG_PORT,
+        user=PG_USER,
+        password=PG_PWD,
+        database="whatsapp_orders"
+    )
+    create_tables(conn)
+    sync_data(conn)
+    conn.close()
+    print("Database sync completed successfully!")
