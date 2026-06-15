@@ -3,7 +3,7 @@
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# CREDENTIALS & SECRETS (never commit these)
+# CREDENTIALS & SECRETS
 # ------------------------------------------------------------------------------
 .env
 *.env
@@ -12,11 +12,12 @@ secrets.json
 config.local.*
 
 # ------------------------------------------------------------------------------
-# WHATSAPP SESSION DATA (contains auth tokens & browser cookies)
+# WHATSAPP SESSION DATA
 # ------------------------------------------------------------------------------
-whatsapp_profile/          # Playwright browser session (old approach)
-whatsapp_session/          # whatsapp-web.js session (new approach)
-*.pb                       # trusted_vault.pb etc.
+whatsapp_profile/
+whatsapp_session/
+.wwebjs_cache/
+.wwebjs_auth/
 
 # ------------------------------------------------------------------------------
 # NODE.JS
@@ -24,8 +25,7 @@ whatsapp_session/          # whatsapp-web.js session (new approach)
 node_modules/
 npm-debug.log*
 yarn-error.log*
-package-lock.json          # optional: uncomment if you don't want to track this
-# yarn.lock
+package-lock.json
 
 # ------------------------------------------------------------------------------
 # PYTHON
@@ -35,8 +35,6 @@ __pycache__/
 *.pyo
 *.pyd
 *.pkl
-
-# Virtual environments
 .venv/
 venv/
 ENV/
@@ -48,10 +46,11 @@ env/
 # ------------------------------------------------------------------------------
 *.log
 webhook.log
+agent_output.txt
 logs/
 
 # ------------------------------------------------------------------------------
-# LOCAL DATABASES & TEST DATA
+# LOCAL DATABASES
 # ------------------------------------------------------------------------------
 *.db
 *.sqlite
@@ -70,17 +69,18 @@ Thumbs.db
 desktop.ini
 
 # ------------------------------------------------------------------------------
-# PLAYWRIGHT (old approach — kept as backup)
+# PLAYWRIGHT (old approach)
 # ------------------------------------------------------------------------------
 playwright-report/
 test-results/
 playwright/.cache/
 
 # ------------------------------------------------------------------------------
-# PERSONAL UTILITY SCRIPTS (local tools, not part of core app)
+# LOCAL UTILITY SCRIPTS (not part of core app)
 # ------------------------------------------------------------------------------
 db_browser.py
 test_webhook.py
 test_matching.py
 debug_*.py
 scratch_*.py
+WhatsAppRecieve.py

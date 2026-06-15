@@ -12,6 +12,7 @@ import re
 import sys
 import json
 import difflib
+import unicodedata
 from datetime import datetime
 import psycopg2
 from dotenv import load_dotenv
@@ -69,12 +70,153 @@ def fetch_messages():
         print("Using simulated inbox messages...")
         return SIMULATED_INBOX
 
-# Normalize phone number to compare last 10 digits
+# ---------------------------------------------------------------------------
+# TEXT NORMALIZATION HELPERS
+# ---------------------------------------------------------------------------
+
+def strip_accents(text):
+    """Remove Unicode diacritics: Díaz -> Diaz, café -> cafe."""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text)
+        if unicodedata.category(c) != "Mn"
+    )
+
 def normalize_phone(phone_str):
+    """Return last 10 digits of any phone string for comparison."""
     if not phone_str:
         return ""
     digits = "".join(c for c in phone_str if c.isdigit())
     return digits[-10:] if len(digits) >= 10 else digits
+
+# Catalog abbreviations found in product names — expand before scoring
+PRODUCT_ABBREVS = {
+    "bnlss": "boneless",
+    "bnls":  "boneless",
+    "b/i":   "bone in",
+    "bi":    "bone in",
+    "fz":    "frozen",
+    "ref":   "refrigerated",
+    "ckd":   "cooked",
+    "ea":    "each",
+    "cs":    "case",
+    "lb":    "pound",
+    "lbs":   "pound",
+    "pc":    "piece",
+    "pcs":   "pieces",
+    "whl":   "whole",
+    "chx":   "chicken",
+    "bef":   "beef",
+    "cfg":   "chicken",
+    "cfm":   "chicken marinade",
+    "ir":    "inside round",
+    "gn":    "ground",
+}
+
+# Spanish <-> English common food terms
+SPANISH_EN = {
+    "pechuga":    "breast",
+    "pechugas":   "breast",
+    "muslo":      "thigh",
+    "muslos":     "thigh",
+    "pierna":     "leg",
+    "piernas":    "leg",
+    "alita":      "wing",
+    "alitas":     "wing",
+    "res":        "beef",
+    "pollo":      "chicken",
+    "cerdo":      "pork",
+    "puerco":     "pork",
+    "camaron":    "shrimp",
+    "camarones":  "shrimp",
+    "bistek":     "bistec",
+    "bistec":     "bistec",
+    "suadero":    "suadero",
+    "costilla":   "rib",
+    "costillas":  "rib",
+    "chorizo":    "chorizo",
+    "molida":     "ground",
+    "molido":     "ground",
+    "marinado":   "marinade",
+    "marinada":   "marinade",
+    "fajita":     "fajita",
+    "fajitas":    "fajita",
+    "taco":       "taco",
+    "tacos":      "taco",
+    "queso":      "cheese",
+    "gaonera":    "ribeye",
+    "arrachera":  "skirt",
+    "diezmillo":  "chuck",
+    "paleta":     "shoulder",
+    "lomo":       "loin",
+    "filete":     "fillet",
+    "milanesa":   "milanesa",
+    "higado":     "liver",
+    "menudo":     "tripe",
+    "barbacoa":   "barbacoa",
+    "lengua":     "tongue",
+    "tripas":     "tripe",
+    "carnitas":   "carnitas",
+    "pastor":     "pastor",
+}
+
+# Noise words in product names that don't help disambiguation
+PRODUCT_NOISE = {
+    "raw", "fresh", "choice", "select", "premium", "bulk", "shelf",
+    "stable", "imported", "whole", "natural", "organic", "usda",
+    "grade", "a", "and", "or", "the", "in", "of", "for", "with",
+    "style", "type", "cut", "sliced", "diced", "strips",
+}
+
+def normalize_text(text):
+    """
+    Lowercase, strip accents, expand abbreviations and Spanish terms,
+    remove punctuation. Returns a clean string ready for tokenization.
+    """
+    text = strip_accents(text.lower())
+    # Pre-pass: normalise slash-joined abbreviations (b/i -> bi, b/i -> bone in)
+    # before we strip all punctuation, so the lookup key is still intact.
+    text = re.sub(r'\b([a-z]+)/([a-z]+)\b', lambda m: m.group(1) + m.group(2), text)
+    # Strip remaining punctuation (keep alphanumeric + spaces)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = text.split()
+    expanded = []
+    for tok in tokens:
+        tok = PRODUCT_ABBREVS.get(tok, tok)   # expand catalog abbreviations
+        tok = SPANISH_EN.get(tok, tok)          # translate Spanish food terms
+        expanded.extend(tok.split())            # "bone in" becomes two tokens
+    return " ".join(expanded)
+
+def token_set(text, noise=None):
+    """Return set of meaningful tokens from a normalized string."""
+    tokens = set(normalize_text(text).split())
+    if noise:
+        tokens -= noise
+    # Drop single-char tokens
+    return {t for t in tokens if len(t) > 1}
+
+def token_f1(query_tokens, candidate_tokens):
+    """
+    F1 between two token sets:
+      precision = |intersection| / |query|   (how much of what was asked is covered)
+      recall    = |intersection| / |candidate| (how much of the product name matches)
+    Weighted toward precision so short queries don't over-match long product names.
+    """
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+    common = query_tokens & candidate_tokens
+    if not common:
+        return 0.0
+    precision = len(common) / len(query_tokens)
+    recall    = len(common) / len(candidate_tokens)
+    if precision + recall == 0:
+        return 0.0
+    # Weighted F1: weight precision 2x (penalise candidate noise less)
+    return (3 * precision * recall) / (2 * precision + recall)
+
+def seq_ratio(a, b):
+    """SequenceMatcher ratio on normalized strings."""
+    na, nb = normalize_text(a), normalize_text(b)
+    return difflib.SequenceMatcher(None, na, nb).ratio()
 
 # NLP and Regex Parser
 def parse_message(body):
@@ -144,13 +286,28 @@ def parse_message(body):
     items = []
     
     # Clean body to process list items
-    # Look for lists separated by "and", commas followed by digits, or newlines
-    parts = re.split(r'\s+and\s+|\n|\s*,\s*(?=\d)|\s+add\s+to\s+my\s+order:\s*', body, flags=re.IGNORECASE)
+    # Separators: "and", "y" (Spanish and), "e" (Spanish and before vowels),
+    #             newlines, commas before digits, explicit "add to my order"
+    parts = re.split(
+        r'\s+and\s+|\s+y\s+|\s+e\s+|\n|\s*,\s*(?=\d)|\s+add\s+to\s+my\s+order:\s*',
+        body,
+        flags=re.IGNORECASE
+    )
     for part in parts:
         part = part.strip()
         if not part:
             continue
         
+        # Pattern B: Item name followed by standalone 'x' and quantity (e.g. "Laurel Molido x 10")
+        # Run FIRST — more specific than Pattern A. Uses \bx\b so 'x' inside words is safe.
+        m2 = re.search(r'^(.+?)\s+\bx\b\s*(\d+(?:\.\d+)?)\s*$', part.strip(), re.IGNORECASE)
+        if m2:
+            item_name = m2.group(1).strip().rstrip("?").strip()
+            qty = float(m2.group(2))
+            if item_name:
+                items.append({"name": item_name, "qty": qty})
+            continue
+
         # Pattern A: Quantity followed by units and item name (e.g. "5 cases of Vinegar, White Distilled 5%")
         # Also handles "10 pounds of Oaxaca Cheese" or "3 boxes of Spicy Buffalo Wings" or "2 cases of White Vinegar"
         m1 = re.search(r'\b(\d+(?:\.\d+)?)\s*(?:cases|units|bags|boxes|pounds|lbs|dozen|doz|pcs|pieces|cs|ea|lb)?\s*(?:of)?\s*([^.]+)', part, re.IGNORECASE)
@@ -173,16 +330,6 @@ def parse_message(body):
             if item_name and is_valid:
                 items.append({"name": item_name, "qty": qty})
                 continue
-                
-        # Pattern B: Item name followed by quantity (e.g. "Laurel Molido x 10")
-        m2 = re.search(r'([^x\d]+)\s*x\s*(\d+(?:\.\d+)?)', part, re.IGNORECASE)
-        if m2:
-            item_name = m2.group(1).strip()
-            # Remove trailing question mark if exists
-            item_name = item_name.rstrip("?").strip()
-            qty = float(m2.group(2))
-            items.append({"name": item_name, "qty": qty})
-            continue
             
     # Remove duplicates or empty
     items = [it for it in items if it["name"]]
@@ -195,104 +342,117 @@ def parse_message(body):
         "special_instructions": special_instructions
     }
 
-# SequenceMatcher ratio
+# Legacy alias kept for any callers outside this file
 def similarity_score(a, b):
-    return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    return seq_ratio(a, b)
 
-# Match customer logic
+# ---------------------------------------------------------------------------
+# CUSTOMER MATCHING
+# ---------------------------------------------------------------------------
+
 def match_customer(conn, parsed_name, sender_phone, sql_audit):
+    """
+    Match an incoming sender to a customer record using a multi-pass strategy:
+      1. Exact phone (last-10-digits normalised, handles = signs, spaces, non-breaking chars)
+      2. Accent-stripped exact name/company match
+      3. Token F1 overlap on accent-stripped, stop-word-removed tokens
+      4. SequenceMatcher on accent-stripped cleaned strings
+      5. Fallback -> CASH SALES
+    """
     cur = conn.cursor()
-    
-    # Query database for all existing customers
     query = "SELECT id, name, company, phone FROM customers;"
     sql_audit.append("EXECUTE: SELECT id, name, company, phone FROM customers;")
     cur.execute(query)
-    
     cols = [col[0] for col in cur.description]
     all_customers = [dict(zip(cols, row)) for row in cur.fetchall()]
-    
-    # Match logic (in order of priority):
-    # 1. Exact phone match -> highest confidence
+
+    # --- 1. Exact phone match (tolerates formatting garbage like '512=576-7097') ---
     if sender_phone:
         norm_sender = normalize_phone(sender_phone)
-        for c in all_customers:
-            if c["phone"] and normalize_phone(c["phone"]) == norm_sender:
-                cur.close()
-                return c, "HIGH", []
-            
-    # 2. Name/company fuzzy and token match
+        if norm_sender:
+            for c in all_customers:
+                if c["phone"] and normalize_phone(c["phone"]) == norm_sender:
+                    cur.close()
+                    return c, "HIGH", []
+
+    # --- 2 + 3 + 4. Name / company text matching ---
     if parsed_name:
+        # Strip accents from the parsed name so Díaz == DIAZ
+        parsed_norm = strip_accents(parsed_name).lower().strip()
+
+        # Customer-specific stop words (terms that appear in many names)
+        cust_stop = {
+            'customer', 'rep', 'agent', 'from', 'co', 'inc', 'corp',
+            'limited', 'ltd', 'llc', 'and', 'the', 'company', 'sales',
+            'restaurant', 'restaurante', 'mexican', 'cantina', 'grocery',
+            'food', 'foods', 'mart', 'supermarket', 'tienda', 'carniceria',
+            'market', 'taqueria', 'tacos', 'taco', 'casa', 'c',
+        }
+        parsed_tokens = (
+            set(re.findall(r'\w+', parsed_norm)) - cust_stop
+        )
+
         best_match = None
         best_score = 0.0
-        
-        parsed_clean = parsed_name.lower().strip()
-        # Words we can discount during token overlap calculations
-        stop_words = {'customer', 'rep', 'agent', 'from', 'foods', 'co', 'inc', 'corp', 'limited', 'ltd', 'and', 'the', 'llc', 'company', 'sales', 'order', 'tacos', 'taco', 'restaurant', 'mexican', 'cantina', 'grocery', 'food', 'mart', 'supermarket', 'tienda', 'carniceria', 'market'}
-        parsed_tokens = set(re.findall(r'\w+', parsed_clean)) - stop_words
-        
+
         for c in all_customers:
-            c_name = c["name"].lower()
-            c_comp = (c["company"] or "").lower()
-            
-            # 2a. Exact string check
-            if parsed_clean == c_name or parsed_clean == c_comp:
+            c_name = strip_accents(c["name"]).lower()
+            c_comp = strip_accents(c["company"] or "").lower()
+            combined = c_name + " " + c_comp
+
+            # 2. Exact / substring on accent-stripped strings
+            if parsed_norm == c_name or parsed_norm == c_comp:
                 score = 1.0
-            # 2b. Substring containment check
-            elif parsed_clean in c_name or parsed_clean in c_comp:
+            elif parsed_norm in combined:
                 score = 0.9
-            elif c_name in parsed_clean or c_comp in parsed_clean:
+            elif c_name in parsed_norm or c_comp in parsed_norm:
                 score = 0.85
             else:
-                # 2c. Token-based word overlap
-                c_tokens = set(re.findall(r'\w+', c_name + " " + c_comp)) - stop_words
-                common = parsed_tokens.intersection(c_tokens)
-                if common:
-                    token_score = len(common) / max(len(parsed_tokens), 1)
-                    score = 0.5 + (token_score * 0.3)
-                else:
-                    score = 0.0
-                
-                # 2d. SequenceMatcher similarity on cleaned strings (stop words removed)
-                parsed_cleaned_str = " ".join(parsed_tokens)
-                c_name_cleaned = " ".join(set(re.findall(r'\w+', c_name)) - stop_words)
-                c_comp_cleaned = " ".join(set(re.findall(r'\w+', c_comp)) - stop_words)
-                
-                fuzzy_name = difflib.SequenceMatcher(None, parsed_cleaned_str, c_name_cleaned).ratio() if parsed_cleaned_str and c_name_cleaned else 0.0
-                fuzzy_comp = difflib.SequenceMatcher(None, parsed_cleaned_str, c_comp_cleaned).ratio() if parsed_cleaned_str and c_comp_cleaned else 0.0
-                score = max(score, fuzzy_name, fuzzy_comp)
-                
+                # 3. Token F1 overlap
+                c_tokens = (
+                    set(re.findall(r'\w+', combined)) - cust_stop
+                )
+                score = token_f1(parsed_tokens, c_tokens) if parsed_tokens and c_tokens else 0.0
+
+                # 4. SequenceMatcher on cleaned strings (accent-stripped, stop-word-removed)
+                p_str = " ".join(sorted(parsed_tokens))
+                c_str = " ".join(sorted(c_tokens))
+                sm = difflib.SequenceMatcher(None, p_str, c_str).ratio() if p_str and c_str else 0.0
+                score = max(score, sm)
+
             if score > best_score:
                 best_score = score
                 best_match = c
-                
-        if best_match and best_score >= 0.8:
+
+        if best_match and best_score >= 0.75:
             cur.close()
-            return best_match, "HIGH" if best_score > 0.9 else "MEDIUM", []
-        elif best_match and best_score >= 0.6:
+            confidence = "HIGH" if best_score >= 0.90 else "MEDIUM"
+            flags = [] if best_score >= 0.90 else [
+                f"[CUSTOMER_CONFIRMATION] '{parsed_name}' matched to "
+                f"'{best_match['name']}' with {best_score:.1%} confidence."
+            ]
+            return best_match, confidence, flags
+        elif best_match and best_score >= 0.5:
             cur.close()
-            return best_match, "MEDIUM", [f"[CUSTOMER_CONFIRMATION] Fuzzy match name/company '{parsed_name}' matched to '{best_match['name']}' with {best_score:.1%} confidence."]
-            
-    # 3. Fallback to CASH SALES (ID: 1714) or first matching customer
-    fallback_cust = None
-    for c in all_customers:
-        if c["id"] == 1714:
-            fallback_cust = c
-            break
-            
+            return best_match, "LOW", [
+                f"[CUSTOMER_NEEDS_REVIEW] Weak match: '{parsed_name}' -> "
+                f"'{best_match['name']}' ({best_score:.1%}). Verify customer."
+            ]
+
+    # --- 5. Fallback -> CASH SALES ---
+    fallback_cust = next((c for c in all_customers if c["id"] == 1714), None)
     if not fallback_cust:
-        for c in all_customers:
-            if "cash" in c["name"].lower():
-                fallback_cust = c
-                break
-                
+        fallback_cust = next((c for c in all_customers if "cash" in c["name"].lower()), None)
     if not fallback_cust and all_customers:
         fallback_cust = all_customers[0]
-        
+
     cur.close()
     if fallback_cust:
-        return fallback_cust, "LOW", [f"[CUSTOMER_NEEDS_REVIEW] Customer '{parsed_name or 'Unknown'}' could not be matched. Defaulted to '{fallback_cust['name']}' (ID: {fallback_cust['id']})."]
-    else:
-        raise Exception("No customers found in database to fallback to.")
+        return fallback_cust, "LOW", [
+            f"[CUSTOMER_NEEDS_REVIEW] Could not match '{parsed_name or 'Unknown'}'. "
+            f"Defaulted to '{fallback_cust['name']}' (ID: {fallback_cust['id']})."
+        ]
+    raise Exception("No customers found in database to fallback to.")
 
 
 # Fetch customer's last 5 orders
@@ -312,70 +472,64 @@ def get_customer_history(conn, customer_id, sql_audit):
     cur.close()
     return [dict(zip(cols, row)) for row in rows]
 
-# Match item to product catalog
+# ---------------------------------------------------------------------------
+# PRODUCT MATCHING
+# ---------------------------------------------------------------------------
+
+PRODUCT_NOISE = {'case', 'cases', 'box', 'boxes', 'lb', 'lbs', 'pound', 'pounds', 'of', 'and', 'the', 'pcs', 'ea'}
+
+def _fetch_product_candidates(cur, item_name, cols):
+    seen_ids = set()
+    candidates = []
+    def add_rows(rows):
+        for row in rows:
+            d = dict(zip(cols, row))
+            if d["id"] not in seen_ids:
+                seen_ids.add(d["id"])
+                candidates.append(d)
+    cur.execute("SELECT * FROM products WHERE LOWER(name) LIKE LOWER(%s) OR LOWER(sku) = LOWER(%s) OR LOWER(description) LIKE LOWER(%s) LIMIT 10;", (f"%{item_name}%", item_name, f"%{item_name}%"))
+    add_rows(cur.fetchall())
+    expanded = normalize_text(item_name)
+    tokens = [t for t in expanded.split() if len(t) > 2 and t not in PRODUCT_NOISE]
+    for tok in tokens:
+        if len(candidates) >= 40: break
+        cur.execute("SELECT * FROM products WHERE LOWER(name) LIKE LOWER(%s) LIMIT 15;", (f"%{tok}%",))
+        add_rows(cur.fetchall())
+    return candidates
+
 def match_item(conn, item_name, customer_history, sql_audit):
     cur = conn.cursor()
-    # Prompt template:
-    query = """
-    SELECT * FROM products
-    WHERE LOWER(name) LIKE LOWER(%s)
-       OR LOWER(sku) = LOWER(%s)
-       OR LOWER(description) LIKE LOWER(%s)
-    LIMIT 3;
-    """
-    search_pattern = f"%{item_name}%"
-    sql_audit.append(f"EXECUTE: SELECT * FROM products WHERE LOWER(name) LIKE LOWER('%{item_name}%') OR LOWER(sku) = LOWER('{item_name}') OR LOWER(description) LIKE LOWER('%{item_name}%') LIMIT 3;")
-    
-    cur.execute(query, (search_pattern, item_name, search_pattern))
+    cur.execute("SELECT * FROM products LIMIT 0;")
     cols = [col[0] for col in cur.description]
-    candidates = [dict(zip(cols, row)) for row in cur.fetchall()]
-    
-    if not candidates:
-        # Broaden search to words if no direct match
-        words = [w for w in item_name.split() if len(w) > 2]
-        if words:
-            word_pattern = f"%{words[0]}%"
-            cur.execute("""
-                SELECT * FROM products
-                WHERE LOWER(name) LIKE LOWER(%s)
-                LIMIT 3
-            """, (word_pattern,))
-            candidates = [dict(zip(cols, row)) for row in cur.fetchall()]
-            
+    sql_audit.append(f"EXECUTE: multi-pass candidate fetch for '{item_name}'")
+    candidates = _fetch_product_candidates(cur, item_name, cols)
     cur.close()
-    
-    # Match logic:
-    # 1. Exact SKU/name match -> use product directly
+    item_lower = item_name.lower()
     for c in candidates:
-        if c["sku"].lower() == item_name.lower() or c["name"].lower() == item_name.lower():
+        if c["sku"].lower() == item_lower or c["name"].lower() == item_lower:
             return c, []
-            
-    # 2. Cross-reference with customer history:
-    # If customer has ordered a similarly named item before, prefer that match
     if customer_history:
-        ordered_product_ids = [o["product_id"] for o in customer_history if o["product_id"] is not None]
+        history_ids = {o["product_id"] for o in customer_history if o["product_id"]}
         for c in candidates:
-            if c["id"] in ordered_product_ids:
-                # Preferred historical match!
-                return c, [f"[HISTORY_MATCH] Match optimized using customer purchase history (ordered previously)."]
-                
-    # 3. Fuzzy match -> present top candidate, flag as ITEM_NEEDS_CONFIRMATION
-    if candidates:
-        # Calculate best similarity score
-        best_c = candidates[0]
-        best_score = similarity_score(item_name, best_c["name"])
-        for c in candidates[1:]:
-            score = similarity_score(item_name, c["name"])
-            if score > best_score:
-                best_score = score
-                best_c = c
-        if best_score > 0.8:
-            return best_c, [] # strong fuzzy match
-        else:
-            return best_c, [f"[ITEM_NEEDS_CONFIRMATION] Fuzzy matched to '{best_c['name']}' with {best_score:.1%} similarity. Verify catalog."]
-            
-    # 4. No match -> flag as UNKNOWN_ITEM
-    return None, [f"[UNKNOWN_ITEM] No product found in catalog matching '{item_name}'."]
+            if c["id"] in history_ids:
+                return c, ["[HISTORY_MATCH] Match optimized using customer purchase history."]
+    query_tokens = token_set(item_name, noise=PRODUCT_NOISE)
+    query_norm = normalize_text(item_name)
+    best_c, best_score = None, 0.0
+    import difflib
+    for c in candidates:
+        prod_tokens = token_set(c["name"], noise=PRODUCT_NOISE)
+        prod_norm = normalize_text(c["name"])
+        f1 = token_f1(query_tokens, prod_tokens)
+        sm = difflib.SequenceMatcher(None, query_norm, prod_norm).ratio()
+        score = min(max(f1, sm) + (0.15 if query_tokens and query_tokens.issubset(prod_tokens) else 0.0), 1.0)
+        if score > best_score:
+            best_score, best_c = score, c
+    if best_c:
+        if best_score >= 0.70:
+            return best_c, ([] if best_score >= 0.85 else [f"[ITEM_NEEDS_CONFIRMATION] Matched to '{best_c['name']}' with {best_score:.1%} confidence. Verify."])
+        return best_c, [f"[ITEM_NEEDS_CONFIRMATION] Low-confidence match to '{best_c['name']}' ({best_score:.1%}). Manual review required."]
+    return None, [f"[UNKNOWN_ITEM] No product found in catalog matching '{item_name}'"]
 
 # Main process function
 def process_incoming_messages():

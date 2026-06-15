@@ -23,8 +23,7 @@ const GROUP_ONLY     = true;   // Set false to also process 1:1 messages
 
 // Only process messages from these group name(s).
 // Leave as an empty array [] to listen to ALL groups.
-// Example: ['Colinas Orders', 'Pedidos Colinas']
-const GROUP_FILTER = [];  // <-- set your group name here once you create it
+const GROUP_FILTER = ['Testing'];
 
 // ── WhatsApp Client ───────────────────────────────────────────────────────────
 const client = new Client({
@@ -64,24 +63,32 @@ client.on('ready', async () => {
     try {
         const chats = await client.getChats();
         const groups = chats.filter(c => c.isGroup);
-        if (groups.length === 0) {
-            console.log('  No groups found on this account.');
-        } else {
-            console.log(`  Found ${groups.length} group(s) on your WhatsApp:`);
-            groups.forEach((g, i) => {
-                const active = GROUP_FILTER.length === 0 || GROUP_FILTER.includes(g.name);
-                const marker = active ? ' [LISTENING]' : '';
-                console.log(`    ${i + 1}. "${g.name}"${marker}`);
-            });
-            if (GROUP_FILTER.length === 0) {
-                console.log('\n  >> Listening to ALL groups above.');
-                console.log('  >> To restrict, edit GROUP_FILTER in whatsapp_listener.js');
-                console.log('  >> Example: const GROUP_FILTER = [\'Colinas Orders\'];\n');
+
+        if (GROUP_FILTER.length > 0) {
+            // Only show the groups we're actually listening to
+            const matched = groups.filter(g => GROUP_FILTER.includes(g.name));
+            if (matched.length === 0) {
+                console.warn(`  ⚠️  WARNING: No groups found matching GROUP_FILTER: ${JSON.stringify(GROUP_FILTER)}`);
+                console.warn('  Check the group name is spelled exactly as it appears in WhatsApp.');
+            } else {
+                console.log('  Listening to:');
+                matched.forEach(g => console.log(`    ✅  "${g.name}"`));
             }
+            // Warn about any filter names that didn't match
+            GROUP_FILTER.forEach(name => {
+                if (!groups.find(g => g.name === name)) {
+                    console.warn(`  ⚠️  Group "${name}" not found on this account — check spelling.`);
+                }
+            });
+        } else {
+            // No filter — show all groups
+            console.log(`  Listening to ALL ${groups.length} group(s):`);
+            groups.forEach((g, i) => console.log(`    ${i + 1}. "${g.name}"`));
         }
     } catch (e) {
         console.warn('  Could not list groups:', e.message);
     }
+
 });
 
 client.on('disconnected', (reason) => {
@@ -102,8 +109,10 @@ client.on('message', async (msg) => {
     if (isGroup && GROUP_FILTER.length > 0) {
         const chat = await msg.getChat();
         if (!GROUP_FILTER.includes(chat.name)) {
+            console.log(`[FILTERED] Ignored msg from group "${chat.name}" — not in GROUP_FILTER`);
             return;  // message is from a different group — ignore it
         }
+        console.log(`[ACCEPTED] Message from group "${chat.name}"`);
     }
 
     // Extract sender info
