@@ -1,41 +1,86 @@
-# Python
+# ==============================================================================
+# WhatsApp Order Agent — .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# CREDENTIALS & SECRETS (never commit these)
+# ------------------------------------------------------------------------------
+.env
+*.env
+.env.*
+secrets.json
+config.local.*
+
+# ------------------------------------------------------------------------------
+# WHATSAPP SESSION DATA (contains auth tokens & browser cookies)
+# ------------------------------------------------------------------------------
+whatsapp_profile/          # Playwright browser session (old approach)
+whatsapp_session/          # whatsapp-web.js session (new approach)
+*.pb                       # trusted_vault.pb etc.
+
+# ------------------------------------------------------------------------------
+# NODE.JS
+# ------------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+package-lock.json          # optional: uncomment if you don't want to track this
+# yarn.lock
+
+# ------------------------------------------------------------------------------
+# PYTHON
+# ------------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 *.pkl
-*.log
 
-# Virtual envs
-.env
-.venv
+# Virtual environments
+.venv/
 venv/
 ENV/
 env/
 *.envrc
 
-# Editor / OS
-.vscode/
-.idea/
-*.swp
-.DS_Store
-Thumbs.db
+# ------------------------------------------------------------------------------
+# LOGS & RUNTIME OUTPUT
+# ------------------------------------------------------------------------------
+*.log
+webhook.log
+logs/
 
-# Playwright / browser profiles
-playwright-report/
-test-results/
-playwright/.cache/
-whatsapp_profile/
-*profile*/  # any other local browser profile dirs you create
-
-# Local databases and data
+# ------------------------------------------------------------------------------
+# LOCAL DATABASES & TEST DATA
+# ------------------------------------------------------------------------------
 *.db
 *.sqlite
 *.sqlite3
 data/
-logs/
 
-# App-specific config
-config.local.json
-*.local.yaml
-*.local.yml
+# ------------------------------------------------------------------------------
+# EDITOR & OS
+# ------------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ------------------------------------------------------------------------------
+# PLAYWRIGHT (old approach — kept as backup)
+# ------------------------------------------------------------------------------
+playwright-report/
+test-results/
+playwright/.cache/
+
+# ------------------------------------------------------------------------------
+# PERSONAL UTILITY SCRIPTS (local tools, not part of core app)
+# ------------------------------------------------------------------------------
+db_browser.py
+test_webhook.py
+test_matching.py
+debug_*.py
+scratch_*.py
