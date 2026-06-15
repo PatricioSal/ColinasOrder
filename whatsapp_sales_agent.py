@@ -457,15 +457,22 @@ def match_customer(conn, parsed_name, sender_phone, sql_audit):
 
 # Fetch customer's last 5 orders
 def get_customer_history(conn, customer_id, sql_audit):
-    cur = conn.cursor()
-    # Prompt template:
-    query = """
-    SELECT * FROM orders
-    WHERE customer_id = %s
-    ORDER BY created_at DESC
-    LIMIT 5;
     """
-    sql_audit.append(f"EXECUTE: SELECT * FROM orders WHERE customer_id = '{customer_id}' ORDER BY created_at DESC LIMIT 5;")
+    Returns the customer's recent distinct products as full product dicts.
+    JOINs with products so we have name, SKU, price for history matching.
+    """
+    cur = conn.cursor()
+    query = """
+    SELECT DISTINCT ON (p.id)
+           p.id, p.name, p.sku, p.price, p.description
+    FROM orders o
+    JOIN products p ON o.product_id = p.id
+    WHERE o.customer_id = %s
+      AND o.product_id IS NOT NULL
+    ORDER BY p.id, o.created_at DESC
+    LIMIT 30;
+    """
+    sql_audit.append(f"EXECUTE: get_customer_history for customer_id={customer_id}")
     cur.execute(query, (customer_id,))
     cols = [col[0] for col in cur.description]
     rows = cur.fetchall()
@@ -498,37 +505,65 @@ def _fetch_product_candidates(cur, item_name, cols):
     return candidates
 
 def match_item(conn, item_name, customer_history, sql_audit):
+    """
+    Match an item name to a product record.
+
+    Priority order (fastest / most accurate first):
+      1. History pass  — fuzzy-score item_name against the customer's past products.
+                         If score >= 0.75, return immediately (no catalog query needed).
+      2. Exact SKU/name match against catalog candidates.
+      3. Fuzzy scoring (token F1 + SequenceMatcher) across catalog candidates.
+    """
+    import difflib
+    item_lower   = item_name.strip().lower()
+    query_tokens = token_set(item_name, noise=PRODUCT_NOISE)
+    query_norm   = normalize_text(item_name)
+
+    # ── PASS 1: Customer history (before any catalog query) ───────────────────
+    if customer_history:
+        best_h, best_h_score = None, 0.0
+        for prod in customer_history:
+            prod_tokens = token_set(prod["name"], noise=PRODUCT_NOISE)
+            prod_norm   = normalize_text(prod["name"])
+            f1   = token_f1(query_tokens, prod_tokens)
+            sm   = difflib.SequenceMatcher(None, query_norm, prod_norm).ratio()
+            score = min(max(f1, sm) + (0.15 if query_tokens and query_tokens.issubset(prod_tokens) else 0.0), 1.0)
+            if score > best_h_score:
+                best_h_score, best_h = score, prod
+        if best_h and best_h_score >= 0.75:
+            # High-confidence history hit — skip catalog entirely
+            confidence_tag = "confirmed" if best_h_score >= 0.90 else f"{best_h_score:.0%}"
+            return best_h, [f"[HISTORY_MATCH] Matched from purchase history ({confidence_tag} confidence)."]
+
+    # ── PASS 2 & 3: Catalog lookup ────────────────────────────────────────────
     cur = conn.cursor()
     cur.execute("SELECT * FROM products LIMIT 0;")
     cols = [col[0] for col in cur.description]
     sql_audit.append(f"EXECUTE: multi-pass candidate fetch for '{item_name}'")
     candidates = _fetch_product_candidates(cur, item_name, cols)
     cur.close()
-    item_lower = item_name.lower()
+
+    # Pass 2: Exact SKU or exact name
     for c in candidates:
         if c["sku"].lower() == item_lower or c["name"].lower() == item_lower:
             return c, []
-    if customer_history:
-        history_ids = {o["product_id"] for o in customer_history if o["product_id"]}
-        for c in candidates:
-            if c["id"] in history_ids:
-                return c, ["[HISTORY_MATCH] Match optimized using customer purchase history."]
-    query_tokens = token_set(item_name, noise=PRODUCT_NOISE)
-    query_norm = normalize_text(item_name)
+
+    # Pass 3: Fuzzy scoring across all candidates
     best_c, best_score = None, 0.0
-    import difflib
     for c in candidates:
         prod_tokens = token_set(c["name"], noise=PRODUCT_NOISE)
-        prod_norm = normalize_text(c["name"])
-        f1 = token_f1(query_tokens, prod_tokens)
-        sm = difflib.SequenceMatcher(None, query_norm, prod_norm).ratio()
+        prod_norm   = normalize_text(c["name"])
+        f1    = token_f1(query_tokens, prod_tokens)
+        sm    = difflib.SequenceMatcher(None, query_norm, prod_norm).ratio()
         score = min(max(f1, sm) + (0.15 if query_tokens and query_tokens.issubset(prod_tokens) else 0.0), 1.0)
         if score > best_score:
             best_score, best_c = score, c
+
     if best_c:
         if best_score >= 0.70:
             return best_c, ([] if best_score >= 0.85 else [f"[ITEM_NEEDS_CONFIRMATION] Matched to '{best_c['name']}' with {best_score:.1%} confidence. Verify."])
         return best_c, [f"[ITEM_NEEDS_CONFIRMATION] Low-confidence match to '{best_c['name']}' ({best_score:.1%}). Manual review required."]
+
     return None, [f"[UNKNOWN_ITEM] No product found in catalog matching '{item_name}'"]
 
 # Main process function
