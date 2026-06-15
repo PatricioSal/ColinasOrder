@@ -215,6 +215,15 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
     return draft_reply
 
 
+def next_business_day():
+    """Returns the next Mon-Fri after today (skips Sat/Sun)."""
+    from datetime import date, timedelta
+    d = date.today() + timedelta(days=1)
+    while d.weekday() >= 5:   # 5 = Saturday, 6 = Sunday
+        d += timedelta(days=1)
+    return d
+
+
 def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flags):
     """Push draft order to remote SQL Server. Returns reply string."""
     try:
@@ -232,37 +241,106 @@ def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flag
         ms.autocommit = False
         cur = ms.cursor()
 
+        # ── 1. Pull customer pre-fill from SQL Server ─────────────────────────
+        cur.execute("""
+            SELECT CustomerName, CustomerShortName, CustomerTaxID,
+                   CustomerAddress1, CustomerAddress2, CustomerCounty,
+                   CustomerCity, CustomerState, CustomerCountry, CustomerZipcode,
+                   PaymentTermsID, DeliveryTermsID, SalesmanID,
+                   Phone, DeliveryNotes
+            FROM Tbl_Sales_Customers
+            WHERE CustomerID = ?
+        """, (customer['id'],))
+        cust_row = cur.fetchone()
+
+        if cust_row:
+            (cust_name, cust_short, cust_tax,
+             addr1, addr2, county, city, state, country, zipcode,
+             pay_terms, del_terms, salesman_id,
+             cust_phone, del_notes) = cust_row
+        else:
+            # Fallback to what we already know if customer not found in MSSQL
+            cust_name   = customer['name']
+            cust_short  = customer['name']
+            cust_tax    = None
+            addr1 = addr2 = county = city = state = country = zipcode = None
+            pay_terms = del_terms = salesman_id = None
+            cust_phone  = None
+            del_notes   = None
+
+        # ── 2. Calculate next business day ────────────────────────────────────
+        ship_date = next_business_day()
+
+        # ── 3. Get next order number ──────────────────────────────────────────
         cur.execute("SELECT ISNULL(MAX(SalesOrderNo), 0) FROM Tbl_Sales_SalesOrder")
         new_order_no = int(cur.fetchone()[0]) + 1
 
-        safe_name  = customer['name'][:100]
-        safe_notes = special_instr[:200]
+        safe_notes = (special_instr or '')[:200]
+        log.info(f"  [MSSQL] Pre-fill: {cust_name} | {addr1}, {city}, {state} {zipcode} | "
+                 f"PayTerms={pay_terms} | DelTerms={del_terms} | Salesman={salesman_id} | Ship={ship_date}")
 
-        cur.execute(
-            "INSERT INTO Tbl_Sales_SalesOrder "
-            "(SalesOrderNo, CustomerID, CustomerName, DateIssued, IsRelease, MadeBy, Cancel, Subtotal, Tax, Total, Notes) "
-            "VALUES (?, ?, ?, GETDATE(), 0, 0, 0, ?, 0.00, ?, ?)",
-            (new_order_no, customer['id'], safe_name, grand_total, grand_total, safe_notes)
-        )
+        # ── 4. Insert sales order header with all pre-filled fields ───────────
+        cur.execute("""
+            INSERT INTO Tbl_Sales_SalesOrder (
+                SalesOrderNo, CustomerID,
+                CustomerName, CustomerTaxID,
+                CustomerAddress1, CustomerAddress2, CustomerCounty,
+                CustomerCity, CustomerState, CustomerCountry, CustomerZipcode,
+                PaymentTermsID, DeliveryTermsID, SalesmanID,
+                CustomerContactName,
+                DateIssued, ShipDate, RequiredDate,
+                IsRelease, MadeBy, Cancel,
+                Subtotal, Tax, Total, Notes
+            ) VALUES (
+                ?, ?,
+                ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?,
+                GETDATE(), ?, ?,
+                0, 0, 0,
+                ?, 0.00, ?, ?
+            )
+        """, (
+            new_order_no, customer['id'],
+            (cust_name or '')[:100], (cust_tax or '')[:50],
+            (addr1 or '')[:150], (addr2 or '')[:150], (county or '')[:100],
+            (city or '')[:100], (state or '')[:50], (country or '')[:50], (zipcode or '')[:20],
+            pay_terms, del_terms, salesman_id,
+            (cust_short or '')[:100],
+            ship_date, ship_date,
+            grand_total, grand_total, safe_notes
+        ))
+
         cur.execute("SELECT @@IDENTITY")
         sales_order_id = int(cur.fetchone()[0])
 
+        # ── 5. Insert order detail lines ──────────────────────────────────────
+        # QuantityCs = cases ordered (from WhatsApp message)
+        # Quantity   = same value (both slots represent the same ordered amount)
         for idx, line in enumerate(order_lines, 1):
             if line['product_id']:
-                cur.execute(
-                    "INSERT INTO Tbl_Sales_SalesOrder_Details "
-                    "(SalesOrderID, ItemNo, MaterialID, PartNo, Description, Quantity, UnitPrice, Amount, UofM, IsTaxable, Notes) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CASE (CS)', 1, ?)",
-                    (sales_order_id, idx, line['product_id'], line['sku'][:50],
-                     line['item_name'][:200], line['qty'], line['price'], line['total'], line['notes'][:100])
-                )
+                cur.execute("""
+                    INSERT INTO Tbl_Sales_SalesOrder_Details (
+                        SalesOrderID, ItemNo, MaterialID, PartNo, Description,
+                        QuantityCs, Quantity,
+                        UnitPrice, Amount, UofM, IsTaxable, Notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'CASE (CS)', 1, ?)
+                """, (
+                    sales_order_id, idx, line['product_id'],
+                    line['sku'][:50], line['item_name'][:200],
+                    line['qty'], line['qty'],          # QuantityCs = Quantity = ordered qty
+                    line['price'], line['total'],
+                    line['notes'][:100]
+                ))
 
         ms.commit()
         cur.close()
         ms.close()
-        log.info(f"  [MSSQL] Draft created: SalesOrderID={sales_order_id}, No={new_order_no}")
+        log.info(f"  [MSSQL] Draft created: SalesOrderID={sales_order_id}, No={new_order_no}, ShipDate={ship_date}")
 
-        reply = f"📋 Draft Sales Order #{new_order_no} created! (ID: {sales_order_id})"
+        reply = f"📋 Draft Sales Order #{new_order_no} created! (ID: {sales_order_id}) Ship: {ship_date.strftime('%a %b %d')}"
         if flags:
             reply += " ⚠️ Needs review."
         return reply
@@ -270,6 +348,7 @@ def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flag
     except Exception as e:
         log.error(f"  [MSSQL ERROR] {e}")
         return "Order received but failed to save to remote database. Please contact sales team."
+
 
 
 def _print_draft(customer, phone, confidence, order_lines, grand_total, delivery_info, flags):
