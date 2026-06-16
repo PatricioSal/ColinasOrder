@@ -97,6 +97,30 @@ def webhook():
     body         = data.get('body', '').strip()
     chat_id      = data.get('chat_id', '')
     is_group     = data.get('is_group', False)
+    timestamp    = data.get('timestamp')
+    body         = data.get('body', '')
+    has_pdf      = data.get('has_pdf', False)
+    pdf_data     = data.get('pdf_data')
+    pdf_name     = data.get('pdf_name', 'order.pdf')
+
+    if has_pdf and pdf_data:
+        try:
+            import fitz
+            import base64
+            pdf_bytes = base64.b64decode(pdf_data)
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            pdf_text = []
+            for page in doc:
+                pdf_text.append(page.get_text("text"))
+            
+            extracted_text = "\n".join(pdf_text).strip()
+            if extracted_text:
+                body = body + f"\n\n[PDF CONTENTS ({pdf_name})]:\n{extracted_text}"
+                log.info(f"[WEBHOOK] Extracted {len(extracted_text)} characters from PDF {pdf_name}")
+            else:
+                log.warning(f"[WEBHOOK] Failed to extract any text from PDF {pdf_name}. Might be an image scan.")
+        except Exception as e:
+            log.error(f"[WEBHOOK] Failed to process PDF {pdf_name}: {e}")
 
     if not body:
         return jsonify({"ok": True, "reply": None})
@@ -161,8 +185,8 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
 
     log.info(f"  Items parsed: {len(parsed['items'])}")
     for item in parsed['items']:
-        log.info(f"    Matching '{item['name']}' x{item['qty']}...")
-        product, item_flags = match_item(conn, item['name'], history, sql_audit)
+        log.info(f"    Matching '{item['name']}' x{item['qty']} (SKU: {item.get('sku')})...")
+        product, item_flags = match_item(conn, item['name'], history, sql_audit, sku=item.get('sku'))
         flags.extend(item_flags)
         if item_flags or not product:
             has_errors = True
@@ -172,8 +196,11 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
             order_lines.append({
                 "product_id": product['id'],
                 "item_name":  product['name'],
+                "original_name": item['name'],
                 "sku":        product['sku'],
                 "qty":        item['qty'],
+                "uom":        item.get('uom', 'EA'),
+                "secondary_qty": item.get('secondary_qty', 0.0),
                 "price":      float(product['price']),
                 "total":      float(product['price']) * item['qty'],
                 "notes":      ", ".join(item_flags) if item_flags else "Matched directly",
@@ -183,8 +210,11 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
             order_lines.append({
                 "product_id": None,
                 "item_name":  item['name'],
+                "original_name": item['name'],
                 "sku":        "UNKNOWN",
                 "qty":        item['qty'],
+                "uom":        item.get('uom', 'EA'),
+                "secondary_qty": item.get('secondary_qty', 0.0),
                 "price":      0.0,
                 "total":      0.0,
                 "notes":      ", ".join(item_flags),
@@ -205,6 +235,9 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
     cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS sender_name  VARCHAR(200);")
     cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS sender_phone VARCHAR(50);")
     cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_overrides JSONB;")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS line_note TEXT;")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS uom VARCHAR(50);")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS secondary_qty NUMERIC;")
     for line in order_lines:
         needs_review = has_errors or (
             "direct" not in line['notes'].lower() and
@@ -213,10 +246,10 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
         cur.execute(
             "INSERT INTO orders (customer_id, product_id, quantity, raw_message, source, status, "
             "                   special_instructions, created_at, needs_review, batch_id,"
-            "                   sender_name, sender_phone) "
-            "VALUES (%s, %s, %s, %s, 'whatsapp', 'pending_review', %s, NOW(), %s, %s, %s, %s);",
+            "                   sender_name, sender_phone, line_note, uom, secondary_qty) "
+            "VALUES (%s, %s, %s, %s, 'whatsapp', 'pending_review', %s, NOW(), %s, %s, %s, %s, %s, %s, %s);",
             (customer['id'], line['product_id'], line['qty'], text,
-             special_instr, needs_review, batch_id, sender_name, sender_phone)
+             special_instr, needs_review, batch_id, sender_name, sender_phone, line['original_name'], line['uom'], line['secondary_qty'])
         )
     conn.commit()
     cur.close()
@@ -343,21 +376,41 @@ def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flag
         sales_order_id = int(cur.fetchone()[0])
 
         # ── 5. Insert order detail lines ──────────────────────────────────────
-        # QuantityCs = cases ordered (from WhatsApp message)
-        # Quantity   = same value (both slots represent the same ordered amount)
         for idx, line in enumerate(order_lines, 1):
             if line['product_id']:
+                uom_raw = line.get('uom', 'EA').upper()
+                qty = float(line.get('qty', 0.0))
+                sec_qty = float(line.get('secondary_qty', 0.0))
+                
+                if uom_raw in ['CSE', 'CASE', 'CS']:
+                    qty_cs = qty
+                    qty_lb = sec_qty
+                elif uom_raw in ['LB', 'LBS']:
+                    qty_cs = 0.0
+                    qty_lb = qty
+                else:
+                    qty_cs = 0.0
+                    qty_lb = qty
+                    
+                # Use the product's designated UofM from the database
+                uom_db = line.get('product_uom', 'CASE (CS)')
+
+                # Fetch the official unit cost (LastCost) from MSSQL materials
+                cur.execute("SELECT TOP 1 LastCost FROM Tbl_WH_Materials WHERE MaterialID = ?", (line['product_id'],))
+                cost_row = cur.fetchone()
+                unit_cost = float(cost_row[0]) if cost_row and cost_row[0] is not None else 0.0
+
                 cur.execute("""
                     INSERT INTO Tbl_Sales_SalesOrder_Details (
                         SalesOrderID, ItemNo, MaterialID, PartNo, Description,
                         QuantityCs, Quantity,
-                        UnitPrice, Amount, UofM, IsTaxable, Notes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'CASE (CS)', 1, ?)
+                        UnitPrice, Amount, UofM, IsTaxable, UnitCost, Notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 """, (
                     sales_order_id, idx, line['product_id'],
                     line['sku'][:50], line['item_name'][:200],
-                    line['qty'], line['qty'],          # QuantityCs = Quantity = ordered qty
-                    line['price'], line['total'],
+                    qty_cs, qty_lb,
+                    line['price'], line['total'], uom_db, unit_cost,
                     line['notes'][:100]
                 ))
 
@@ -436,12 +489,13 @@ def api_orders_pending():
                 MAX(o.sender_name)                   AS sender_name,
                 MAX(o.sender_phone)                  AS sender_phone,
                 json_agg(json_build_object(
-                    'id',      o.id,
-                    'product', COALESCE(p.name, o.id::text),
-                    'sku',     COALESCE(p.sku, 'UNKNOWN'),
-                    'qty',     o.quantity,
-                    'price',   COALESCE(p.price, 0),
-                    'total',   COALESCE(p.price * o.quantity, 0)
+                    'id',        o.id,
+                    'product',   COALESCE(p.name, o.id::text),
+                    'sku',       COALESCE(p.sku, 'UNKNOWN'),
+                    'qty',       o.quantity,
+                    'price',     COALESCE(p.price, 0),
+                    'total',     COALESCE(p.price * o.quantity, 0),
+                    'line_note', o.line_note
                 ) ORDER BY o.id) AS lines
             FROM orders o
             LEFT JOIN customers c ON o.customer_id = c.id
@@ -537,14 +591,25 @@ def api_orders_edit():
             line_id = line.get('id')
             qty = line.get('qty')
             prod_id = line.get('product_id')
+            note = line.get('line_note')
             
             if line_id is not None:
-                if qty is not None and prod_id is not None:
-                    cur.execute("UPDATE orders SET quantity = %s, product_id = %s WHERE id = %s AND batch_id = %s", (qty, prod_id, line_id, batch_id))
-                elif qty is not None:
-                    cur.execute("UPDATE orders SET quantity = %s WHERE id = %s AND batch_id = %s", (qty, line_id, batch_id))
-                elif prod_id is not None:
-                    cur.execute("UPDATE orders SET product_id = %s WHERE id = %s AND batch_id = %s", (prod_id, line_id, batch_id))
+                updates = []
+                params = []
+                if qty is not None:
+                    updates.append("quantity = %s")
+                    params.append(qty)
+                if prod_id is not None:
+                    updates.append("product_id = %s")
+                    params.append(prod_id)
+                if note is not None:
+                    updates.append("line_note = %s")
+                    params.append(note)
+                
+                if updates:
+                    query = f"UPDATE orders SET {', '.join(updates)} WHERE id = %s AND batch_id = %s"
+                    params.extend([line_id, batch_id])
+                    cur.execute(query, tuple(params))
                 
         conn.commit()
         cur.close()
@@ -569,7 +634,7 @@ def api_confirm_order():
             SELECT o.id, o.customer_id, c.name AS customer_name,
                    o.product_id, p.name AS product_name, p.sku, p.price,
                    o.quantity, o.special_instructions, o.needs_review,
-                   o.customer_overrides
+                   o.customer_overrides, o.uom, o.secondary_qty, p.description
             FROM orders o
             LEFT JOIN customers c ON o.customer_id = c.id
             LEFT JOIN products  p ON o.product_id  = p.id
@@ -587,6 +652,10 @@ def api_confirm_order():
         for r in rows:
             qty   = float(r[7]) if r[7] else 0
             price = float(r[6]) if r[6] else 0.0
+            
+            desc = r[13] or ""
+            product_uom = desc.replace("UM: ", "").strip() if desc.startswith("UM: ") else "CASE (CS)"
+            
             order_lines.append({
                 'product_id': r[3],
                 'item_name':  r[4] or 'Unknown',
@@ -595,6 +664,9 @@ def api_confirm_order():
                 'price':      price,
                 'total':      price * qty,
                 'notes':      'Confirmed via dashboard',
+                'uom':        r[11] or 'EA',
+                'secondary_qty': float(r[12]) if r[12] else 0.0,
+                'product_uom': product_uom
             })
         grand_total   = sum(l['total'] for l in order_lines)
         special_instr = rows[0][8] or 'None'

@@ -218,8 +218,77 @@ def seq_ratio(a, b):
     na, nb = normalize_text(a), normalize_text(b)
     return difflib.SequenceMatcher(None, na, nb).ratio()
 
+# Aspen Systems PDF Parser
+def parse_aspen_pdf(body):
+    lines = [l.strip() for l in body.split('\n') if l.strip()]
+    items = []
+    company_name = None
+    
+    # Extract Company Name
+    for i, line in enumerate(lines):
+        if line.lower() == "bill to:" or line.lower() == "ship to:":
+            if i + 1 < len(lines):
+                company_name = lines[i+1].strip()
+                break
+
+    # Extract Items
+    i = 0
+    while i < len(lines):
+        uom_val = lines[i].upper()
+        if uom_val in ['CSE', 'LB', 'EA', 'CS', 'CASE', 'LBS'] and i >= 3:
+            try:
+                qty = float(lines[i-1].replace(',', ''))
+                
+                # Description is usually 2 lines up. Vendor codes are typically format 'CF xxxx'
+                desc_idx = i - 2
+                sku = None
+                vendor_line = lines[desc_idx]
+                
+                if vendor_line.startswith('CF '):
+                    sku = vendor_line.replace('CF ', '').strip()
+                    desc_idx = i - 3
+                elif len(vendor_line) <= 8 and vendor_line.replace('.','').isdigit():
+                    sku = vendor_line.strip()
+                    desc_idx = i - 3
+                    
+                item_name = lines[desc_idx]
+                
+                secondary_qty = 0.0
+                if i + 1 < len(lines):
+                    try:
+                        secondary_qty = float(lines[i+1].replace(',', ''))
+                    except ValueError:
+                        pass
+                
+                # Skip invalid rows
+                if len(item_name) > 3 and not item_name.replace('.','').isdigit():
+                    items.append({
+                        "name": item_name, 
+                        "qty": qty,
+                        "sku": sku,
+                        "uom": uom_val,
+                        "secondary_qty": secondary_qty
+                    })
+            except ValueError:
+                pass
+        i += 1
+        
+    # Remove duplicates or empty
+    items = [it for it in items if it["name"]]
+    
+    return {
+        "message_type": "order" if items else "non_order",
+        "company_name": company_name,
+        "items": items,
+        "delivery_info": None,
+        "special_instructions": "Extracted from Aspen PDF"
+    }
+
 # NLP and Regex Parser
 def parse_message(body):
+    if "aspen-systems.com" in body.lower() or ("Product Code" in body and "Order Qty" in body):
+        return parse_aspen_pdf(body)
+
     body_lower = body.lower()
     
     # Check if this is an order message
@@ -536,16 +605,28 @@ def _fetch_product_candidates(cur, item_name, cols):
 
     return candidates
 
-def match_item(conn, item_name, customer_history, sql_audit):
+def match_item(conn, item_name, customer_history, sql_audit, sku=None):
     """
     Match an item name to a product record.
 
     Priority order (fastest / most accurate first):
+      0. Exact provided SKU lookup.
       1. History pass  — fuzzy-score item_name against the customer's past products.
                          If score >= 0.75, return immediately (no catalog query needed).
       2. Exact SKU/name match against catalog candidates.
       3. Fuzzy scoring (token F1 + SequenceMatcher) across catalog candidates.
     """
+    if sku:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM products WHERE LOWER(sku) = LOWER(%s) LIMIT 1;", (sku,))
+        if cur.description:
+            cols = [col[0] for col in cur.description]
+            row = cur.fetchone()
+            if row:
+                cur.close()
+                return dict(zip(cols, row)), ["[EXACT_SKU_MATCH] Matched exactly via vendor SKU."]
+        cur.close()
+
     import difflib
     
     translations = {

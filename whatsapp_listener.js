@@ -127,10 +127,27 @@ client.on('message', async (msg) => {
     const chatId     = msg.from;
     const body       = msg.body || '';
 
-    if (!body.trim()) return;  // ignore empty / media-only messages
+    let hasPdf = false;
+    let pdfData = null;
+    let pdfName = null;
+
+    if (msg.hasMedia) {
+        try {
+            const media = await msg.downloadMedia();
+            if (media && media.mimetype === 'application/pdf') {
+                hasPdf = true;
+                pdfData = media.data; // Base64 encoded string
+                pdfName = media.filename || 'order.pdf';
+            }
+        } catch (e) {
+            console.error('   ✗ Failed to download media:', e.message);
+        }
+    }
+
+    if (!body.trim() && !hasPdf) return;  // ignore empty / non-pdf media-only messages
 
     const ts = new Date().toISOString();
-    console.log(`[${ts.slice(11,19)}] MSG from ${senderName} (${senderPhone}): "${body.slice(0, 80)}${body.length > 80 ? '...' : ''}"`);
+    console.log(`[${ts.slice(11,19)}] MSG from ${senderName} (${senderPhone}): "${body.slice(0, 80)}${body.length > 80 ? '...' : ''}"${hasPdf ? ' [PDF ATTACHED]' : ''}`);
 
     // POST to Python
     try {
@@ -141,6 +158,9 @@ client.on('message', async (msg) => {
             chat_id:      chatId,
             is_group:     isGroup,
             timestamp:    ts,
+            has_pdf:      hasPdf,
+            pdf_data:     pdfData,
+            pdf_name:     pdfName
         }, { timeout: 30000 });
 
         // Python may return a reply string

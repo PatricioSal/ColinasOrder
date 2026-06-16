@@ -575,6 +575,7 @@ class App(ctk.CTk):
 
         qty_entries = {}
         prod_vars = {}
+        note_entries = {}
         deleted_line_ids = []
 
         for line in order.get("lines", []):
@@ -595,14 +596,24 @@ class App(ctk.CTk):
             qty_entry.insert(0, str(line.get("qty", 0)))
             qty_entry.pack(side="left")
 
+            ctk.CTkLabel(top_part, text="Note:", font=ctk.CTkFont(size=12), text_color=TEXT2).pack(side="left", padx=(10, 5))
+            note_entry = ctk.CTkEntry(top_part, width=150)
+            note_entry.insert(0, line.get("line_note") or "")
+            note_entry.pack(side="left")
+
             def remove_line(r=row, lid=line["id"]):
                 r.destroy()
                 if lid in qty_entries: del qty_entries[lid]
                 if lid in prod_vars: del prod_vars[lid]
+                if lid in note_entries: del note_entries[lid]
                 deleted_line_ids.append(lid)
 
             ctk.CTkButton(top_part, text="✗", width=30, fg_color=CARD, hover_color="#3d1f1f",
                           text_color=ERROR, command=remove_line).pack(side="left", padx=(10, 0))
+
+            qty_entries[line["id"]] = qty_entry
+            prod_vars[line["id"]]   = prod_id_var
+            note_entries[line["id"]] = note_entry
 
             results_frame = ctk.CTkScrollableFrame(row, height=120, fg_color=SURFACE)
 
@@ -681,7 +692,15 @@ class App(ctk.CTk):
                     qty = float(entry_widget.get())
                     prod_id_str = prod_vars[line_id]["id"].get()
                     prod_id = int(prod_id_str) if prod_id_str.isdigit() else None
-                    lines_data.append({"id": line_id, "qty": qty, "product_id": prod_id})
+                    
+                    note_str = note_entries[line_id].get().strip() if line_id in note_entries else None
+                    
+                    lines_data.append({
+                        "id": line_id, 
+                        "qty": qty, 
+                        "product_id": prod_id,
+                        "line_note": note_str
+                    })
                 except ValueError:
                     pass
 
