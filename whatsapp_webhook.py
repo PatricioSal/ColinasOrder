@@ -24,7 +24,7 @@ import json
 import logging
 import requests
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 from dotenv import load_dotenv
 
 from whatsapp_sales_agent import (
@@ -42,6 +42,18 @@ FLASK_PORT       = 5050          # Must match PYTHON_WEBHOOK port in whatsapp_li
 NODE_SEND_URL    = 'http://localhost:3000/send'   # Node.js /send endpoint
 PUSH_TO_MSSQL    = os.getenv("PUSH_TO_MSSQL", "False").lower() in ("true", "1", "yes")
 
+# ── SQL Server connection string (shared by webhook + dashboard login) ────────
+MSSQL_CONN_STR = (
+    "DRIVER={ODBC Driver 18 for SQL Server};"
+    "SERVER=your_sql_server_ip,port;"
+    "DATABASE=ColinasProducts;"
+    "UID=your_sql_username;"
+    "PWD=***REMOVED***;"
+    "Encrypt=yes;"
+    "TrustServerCertificate=yes;"
+)
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -56,6 +68,7 @@ log = logging.getLogger(__name__)
 
 # ── Flask App ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'wa-order-bot-secret-2024')
 
 # Bot reply prefixes — prevent processing our own replies
 BOT_REPLY_PREFIXES = (
@@ -228,16 +241,7 @@ def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flag
     """Push draft order to remote SQL Server. Returns reply string."""
     try:
         import pyodbc
-        mssql_conn_str = (
-            "DRIVER={ODBC Driver 18 for SQL Server};"
-            "SERVER=your_sql_server_ip,port;"
-            "DATABASE=ColinasProducts;"
-            "UID=your_sql_username;"
-            "PWD=***REMOVED***;"
-            "Encrypt=yes;"
-            "TrustServerCertificate=yes;"
-        )
-        ms = pyodbc.connect(mssql_conn_str, timeout=5)
+        ms = pyodbc.connect(MSSQL_CONN_STR, timeout=5)
         ms.autocommit = False
         cur = ms.cursor()
 
@@ -373,6 +377,97 @@ def _print_draft(customer, phone, confidence, order_lines, grand_total, delivery
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({"status": "ok", "time": datetime.now().isoformat()})
+
+
+# ── Dashboard API Routes ────────────────────────────────────────────────────
+
+
+@app.route('/api/status')
+def api_status():
+    """Live health check for all four services."""
+    result = {'flask': True, 'node': False, 'mssql': False, 'postgres': False}
+    try:
+        r = requests.get('http://localhost:3000/status', timeout=2)
+        result['node'] = r.status_code == 200
+    except Exception:
+        pass
+    try:
+        import pyodbc
+        c = pyodbc.connect(MSSQL_CONN_STR, timeout=3)
+        c.close()
+        result['mssql'] = True
+    except Exception:
+        pass
+    try:
+        c = get_db_connection()
+        c.close()
+        result['postgres'] = True
+    except Exception:
+        pass
+    return jsonify(result)
+
+
+@app.route('/api/orders')
+def api_orders():
+    """Return last 50 orders with customer and product info."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT o.id,
+                   COALESCE(c.name, 'Unknown')  AS customer,
+                   COALESCE(p.name, '—')        AS product,
+                   o.quantity, o.status, o.needs_review,
+                   o.raw_message, o.created_at
+            FROM orders o
+            LEFT JOIN customers c ON o.customer_id = c.id
+            LEFT JOIN products  p ON o.product_id  = p.id
+            ORDER BY o.created_at DESC LIMIT 50;
+        """)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        result = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            if d.get('created_at'):
+                d['created_at'] = d['created_at'].isoformat()
+            if d.get('quantity') is not None:
+                d['quantity'] = float(d['quantity'])
+            result.append(d)
+        return jsonify(result)
+    except Exception as e:
+        log.error(f'[API /orders] {e}')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/stats')
+def api_stats():
+    """Return aggregate counts for the stats cards."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM orders WHERE created_at::date = CURRENT_DATE) AS orders_today,
+                (SELECT COUNT(*) FROM orders WHERE needs_review = TRUE)             AS needs_review,
+                (SELECT COUNT(*) FROM customers)                                    AS customers,
+                (SELECT COUNT(*) FROM products)                                     AS products;
+        """)
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return jsonify({
+            'orders_today': row[0],
+            'needs_review':  row[1],
+            'customers':     row[2],
+            'products':      row[3],
+        })
+    except Exception as e:
+        log.error(f'[API /stats] {e}')
+        return jsonify({'error': str(e)}), 500
+
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -23,7 +23,8 @@ const GROUP_ONLY     = true;   // Set false to also process 1:1 messages
 
 // Only process messages from these group name(s).
 // Leave as an empty array [] to listen to ALL groups.
-const GROUP_FILTER = ['Testing'];
+// NOTE: This is now mutable — updated live via POST /config from the dashboard.
+let currentGroupFilter = ['Testing'];
 
 // ── WhatsApp Client ───────────────────────────────────────────────────────────
 const client = new Client({
@@ -56,7 +57,7 @@ client.on('ready', async () => {
     console.log(`  Posting messages to: ${PYTHON_WEBHOOK}`);
     console.log(`  Reply endpoint:      http://localhost:${LISTENER_PORT}/send`);
     console.log(`  Group only mode:     ${GROUP_ONLY}`);
-    console.log(`  Group filter:        ${GROUP_FILTER.length ? GROUP_FILTER.join(', ') : '(all groups)'}`);
+    console.log(`  Group filter:        ${currentGroupFilter.length ? currentGroupFilter.join(', ') : '(all groups)'}`);
     console.log('====================================\n');
 
     // Print all available groups so the user can pick which one to use
@@ -64,18 +65,18 @@ client.on('ready', async () => {
         const chats = await client.getChats();
         const groups = chats.filter(c => c.isGroup);
 
-        if (GROUP_FILTER.length > 0) {
+        if (currentGroupFilter.length > 0) {
             // Only show the groups we're actually listening to
-            const matched = groups.filter(g => GROUP_FILTER.includes(g.name));
+            const matched = groups.filter(g => currentGroupFilter.includes(g.name));
             if (matched.length === 0) {
-                console.warn(`  ⚠️  WARNING: No groups found matching GROUP_FILTER: ${JSON.stringify(GROUP_FILTER)}`);
+                console.warn(`  ⚠️  WARNING: No groups found matching filter: ${JSON.stringify(currentGroupFilter)}`);
                 console.warn('  Check the group name is spelled exactly as it appears in WhatsApp.');
             } else {
                 console.log('  Listening to:');
                 matched.forEach(g => console.log(`    ✅  "${g.name}"`));
             }
             // Warn about any filter names that didn't match
-            GROUP_FILTER.forEach(name => {
+            currentGroupFilter.forEach(name => {
                 if (!groups.find(g => g.name === name)) {
                     console.warn(`  ⚠️  Group "${name}" not found on this account — check spelling.`);
                 }
@@ -106,10 +107,10 @@ client.on('message', async (msg) => {
     if (GROUP_ONLY && !isGroup) return;
 
     // Apply group name filter (if configured)
-    if (isGroup && GROUP_FILTER.length > 0) {
+    if (isGroup && currentGroupFilter.length > 0) {
         const chat = await msg.getChat();
-        if (!GROUP_FILTER.includes(chat.name)) {
-            console.log(`[FILTERED] Ignored msg from group "${chat.name}" — not in GROUP_FILTER`);
+        if (!currentGroupFilter.includes(chat.name)) {
+            console.log(`[FILTERED] Ignored msg from group "${chat.name}" — not in filter`);
             return;  // message is from a different group — ignore it
         }
         console.log(`[ACCEPTED] Message from group "${chat.name}"`);
@@ -175,6 +176,35 @@ app.post('/send', async (req, res) => {
 
 app.get('/status', (req, res) => {
     res.json({ status: client.info ? 'ready' : 'not_ready', info: client.info });
+});
+
+// ── Dashboard API — group selection ─────────────────────────────────────────
+// GET /groups  → list all WhatsApp groups + which ones are currently active
+app.get('/groups', async (req, res) => {
+    try {
+        const chats  = await client.getChats();
+        const groups = chats
+            .filter(c => c.isGroup)
+            .map(g => ({
+                name:   g.name,
+                id:     g.id._serialized,
+                active: currentGroupFilter.includes(g.name),
+            }));
+        res.json({ ok: true, groups, current: currentGroupFilter });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
+
+// POST /config { groups: ["Group A", "Group B"] } → update filter live
+app.post('/config', (req, res) => {
+    const { groups } = req.body;
+    if (!Array.isArray(groups)) {
+        return res.status(400).json({ error: 'groups must be an array of strings' });
+    }
+    currentGroupFilter = groups;
+    console.log(`[CONFIG] Group filter updated: ${JSON.stringify(currentGroupFilter)}`);
+    res.json({ ok: true, current: currentGroupFilter });
 });
 
 app.listen(LISTENER_PORT, () => {
