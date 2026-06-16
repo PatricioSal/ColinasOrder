@@ -830,15 +830,7 @@ def process_incoming_messages():
         cur.close()
         
         # Remote SQL Server Draft Inserts
-        mssql_conn_str = (
-            "DRIVER={ODBC Driver 18 for SQL Server};"
-            "SERVER=your_sql_server_ip,port;"
-            "DATABASE=ColinasProducts;"
-            "UID=your_sql_username;"
-            "PWD=***REMOVED***;"
-            "Encrypt=yes;"
-            "TrustServerCertificate=yes;"
-        )
+        mssql_conn_str = os.getenv("MSSQL_CONN_STR", "")
         
         # Pre-format SQL statements for audit trail / print
         escaped_customer_name = customer['name'].replace("'", "''")

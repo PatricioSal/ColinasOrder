@@ -44,15 +44,7 @@ NODE_SEND_URL    = 'http://localhost:3000/send'   # Node.js /send endpoint
 PUSH_TO_MSSQL    = os.getenv("PUSH_TO_MSSQL", "False").lower() in ("true", "1", "yes")
 
 # ── SQL Server connection string (shared by webhook + dashboard login) ────────
-MSSQL_CONN_STR = (
-    "DRIVER={ODBC Driver 18 for SQL Server};"
-    "SERVER=your_sql_server_ip,port;"
-    "DATABASE=ColinasProducts;"
-    "UID=your_sql_username;"
-    "PWD=***REMOVED***;"
-    "Encrypt=yes;"
-    "TrustServerCertificate=yes;"
-)
+MSSQL_CONN_STR = os.getenv("MSSQL_CONN_STR", "")
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────

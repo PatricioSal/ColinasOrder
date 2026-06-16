@@ -3,21 +3,18 @@ from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import pyodbc
 import decimal
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # DB Config
 PG_USER = "openpg"
 PG_PWD = "openpgpwd"
 PG_HOST = "localhost"
 PG_PORT = 5432
 
-MSSQL_CONN_STR = (
-    "DRIVER={ODBC Driver 18 for SQL Server};"
-    "SERVER=your_sql_server_ip,port;"
-    "DATABASE=ColinasProducts;"
-    "UID=your_sql_username;"
-    "PWD=***REMOVED***;"
-    "Encrypt=yes;"
-    "TrustServerCertificate=yes;"
-)
+MSSQL_CONN_STR = os.getenv("MSSQL_CONN_STR", "")
 
 def create_db_if_not_exists():
     print("Connecting to default PostgreSQL database to check/create whatsapp_orders database...")
