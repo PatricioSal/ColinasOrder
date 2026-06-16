@@ -182,6 +182,9 @@ app.get('/status', (req, res) => {
 // GET /groups  → list all WhatsApp groups + which ones are currently active
 app.get('/groups', async (req, res) => {
     try {
+        if (!client.info) {
+            return res.status(503).json({ ok: false, error: 'WhatsApp is still starting up or syncing. Please wait a moment and click Refresh...' });
+        }
         const chats  = await client.getChats();
         const groups = chats
             .filter(c => c.isGroup)

@@ -22,6 +22,7 @@ import os
 import sys
 import json
 import logging
+import uuid
 import requests
 from datetime import datetime
 from flask import Flask, request, jsonify, session
@@ -105,7 +106,7 @@ def webhook():
         log.info(f"[SKIP] Bot reply loop prevented: '{body[:60]}'")
         return jsonify({"ok": True, "reply": None})
 
-    log.info(f"[WEBHOOK] From '{sender_name}' ({sender_phone}): \"{body[:80]}{'...' if len(body)>80 else ''}\"")
+    log.info(f"[WEBHOOK] From '{sender_name}' ({sender_phone}): \"{body}\"")
 
     try:
         reply = process_order(sender_name, sender_phone, body, chat_id)
@@ -119,11 +120,12 @@ def webhook():
 def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) -> str:
     """
     Full order processing pipeline.
+    Saves order to local PostgreSQL for human review.
     Returns a reply string to send back to WhatsApp.
     """
-    conn       = get_db_connection()
-    sql_audit  = []
-    flags      = []
+    conn      = get_db_connection()
+    sql_audit = []
+    flags     = []
 
     # 1. Parse message
     log.info("  Parsing message...")
@@ -144,8 +146,7 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
         return "Thank you for your message. Your inquiry has been logged."
 
     # 2. Match customer
-    # sender_phone comes directly from WhatsApp metadata — always reliable
-    parsed_cust_name = parsed['company_name'] if parsed['company_name'] else sender_name
+    parsed_cust_name = parsed['company_name']
     log.info(f"  Matching customer: '{parsed_cust_name}' (phone: '{sender_phone}')...")
     customer, confidence, cust_flags = match_customer(conn, parsed_cust_name, sender_phone, sql_audit)
     flags.extend(cust_flags)
@@ -189,43 +190,48 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
                 "notes":      ", ".join(item_flags),
             })
 
-    # 5. Write to local PostgreSQL
+    # 5. Write to local PostgreSQL with a shared batch_id
+    #    All lines from this WhatsApp message share the same batch_id so the
+    #    dashboard can group them into a single reviewable order.
     grand_total   = sum(l['total'] for l in order_lines)
     special_instr = parsed['special_instructions'] or 'None'
     delivery_info = parsed['delivery_info'] or 'None specified'
+    batch_id      = str(uuid.uuid4())
 
-    log.info(f"  Writing {len(order_lines)} lines to local DB (total: ${grand_total:.2f})...")
+    log.info(f"  Writing {len(order_lines)} lines to local DB (batch {batch_id[:8]}, total: ${grand_total:.2f})...")
     cur = conn.cursor()
+    # Ensure extra columns exist (idempotent migrations)
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_id UUID;")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS sender_name  VARCHAR(200);")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS sender_phone VARCHAR(50);")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_overrides JSONB;")
     for line in order_lines:
         needs_review = has_errors or (
             "direct" not in line['notes'].lower() and
             "history" not in line['notes'].lower()
         )
         cur.execute(
-            "INSERT INTO orders (customer_id, product_id, quantity, raw_message, source, status, special_instructions, created_at, needs_review) "
-            "VALUES (%s, %s, %s, %s, 'whatsapp', 'pending_review', %s, NOW(), %s);",
-            (customer['id'], line['product_id'], line['qty'], text, special_instr, needs_review)
+            "INSERT INTO orders (customer_id, product_id, quantity, raw_message, source, status, "
+            "                   special_instructions, created_at, needs_review, batch_id,"
+            "                   sender_name, sender_phone) "
+            "VALUES (%s, %s, %s, %s, 'whatsapp', 'pending_review', %s, NOW(), %s, %s, %s, %s);",
+            (customer['id'], line['product_id'], line['qty'], text,
+             special_instr, needs_review, batch_id, sender_name, sender_phone)
         )
     conn.commit()
     cur.close()
-    log.info("  Local DB write complete.")
-
-    # 6. Push to remote SQL Server (if enabled)
-    reply_msg = _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flags) \
-        if PUSH_TO_MSSQL else None
-
     conn.close()
+    log.info("  Local DB write complete — awaiting human review.")
 
-    # 7. Print sales draft to terminal
+    # 6. Print sales draft to log
     _print_draft(customer, sender_phone, confidence, order_lines, grand_total, delivery_info, flags)
 
-    # 8. Build reply
-    if reply_msg:
-        return reply_msg
-    draft_reply = f"✅ Order draft saved! {len(order_lines)} item(s), total: ${grand_total:.2f}."
-    if flags:
-        draft_reply += " ⚠️ Needs review."
-    return draft_reply
+    # 7. Reply to WhatsApp — order queued for review, NOT yet confirmed
+    flag_note = " Some items may need manual verification." if flags else ""
+    return (
+        f"\u2705 Order received! {len(order_lines)} item(s), estimated total: ${grand_total:.2f}.\n"
+        f"A team member will review and confirm your order shortly.{flag_note}"
+    )
 
 
 def next_business_day():
@@ -237,7 +243,7 @@ def next_business_day():
     return d
 
 
-def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flags):
+def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flags, overrides=None):
     """Push draft order to remote SQL Server. Returns reply string."""
     try:
         import pyodbc
@@ -271,6 +277,22 @@ def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flag
             pay_terms = del_terms = salesman_id = None
             cust_phone  = None
             del_notes   = None
+
+        # Apply any overrides from the dashboard review tab
+        if overrides:
+            cust_name   = overrides.get('name', cust_name)
+            cust_tax    = overrides.get('tax_id', cust_tax)
+            addr1       = overrides.get('address1', addr1)
+            addr2       = overrides.get('address2', addr2)
+            city        = overrides.get('city', city)
+            state       = overrides.get('state', state)
+            country     = overrides.get('country', country)
+            zipcode     = overrides.get('zipcode', zipcode)
+            pay_terms   = overrides.get('payment_terms', pay_terms)
+            del_terms   = overrides.get('delivery_terms', del_terms)
+            salesman_id = overrides.get('salesman_id', salesman_id)
+            cust_phone  = overrides.get('phone', cust_phone)
+            del_notes   = overrides.get('delivery_notes', del_notes)
 
         # ── 2. Calculate next business day ────────────────────────────────────
         ship_date = next_business_day()
@@ -381,6 +403,242 @@ def health():
 
 # ── Dashboard API Routes ────────────────────────────────────────────────────
 
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    """Test MSSQL connection — called by dashboard Connect button."""
+    try:
+        import pyodbc
+        c = pyodbc.connect(MSSQL_CONN_STR, timeout=5)
+        c.close()
+        session['connected'] = True
+        log.info('[DASHBOARD] Login successful — MSSQL connection verified.')
+        return jsonify({'ok': True})
+    except Exception as e:
+        log.warning(f'[DASHBOARD] Login failed: {e}')
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/orders/pending')
+def api_orders_pending():
+    """Return pending orders grouped by batch_id, enriched with MSSQL customer profile."""
+    try:
+        conn = get_db_connection()
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT
+                o.batch_id::text,
+                o.customer_id,
+                COALESCE(c.name, 'Unknown Customer') AS customer_name,
+                o.raw_message,
+                o.special_instructions,
+                MIN(o.created_at)                    AS received_at,
+                bool_or(o.needs_review)              AS needs_review,
+                MAX(o.sender_name)                   AS sender_name,
+                MAX(o.sender_phone)                  AS sender_phone,
+                json_agg(json_build_object(
+                    'id',      o.id,
+                    'product', COALESCE(p.name, o.id::text),
+                    'sku',     COALESCE(p.sku, 'UNKNOWN'),
+                    'qty',     o.quantity,
+                    'price',   COALESCE(p.price, 0),
+                    'total',   COALESCE(p.price * o.quantity, 0)
+                ) ORDER BY o.id) AS lines
+            FROM orders o
+            LEFT JOIN customers c ON o.customer_id = c.id
+            LEFT JOIN products  p ON o.product_id  = p.id
+            WHERE o.status = 'pending_review'
+              AND o.batch_id IS NOT NULL
+            GROUP BY o.batch_id, o.customer_id, c.name, o.raw_message, o.special_instructions
+            ORDER BY MIN(o.created_at) ASC;
+        """)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        result = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            if d.get('received_at'):
+                d['received_at'] = d['received_at'].isoformat()
+
+            # ── Enrich with MSSQL customer profile ────────────────────────────
+            d['customer_details'] = None
+            cust_id = d.get('customer_id')
+            if cust_id:
+                try:
+                    import pyodbc
+                    ms  = pyodbc.connect(MSSQL_CONN_STR, timeout=4)
+                    cur2 = ms.cursor()
+                    cur2.execute("""
+                        SELECT
+                            CustomerName, Phone,
+                            CustomerAddress1, CustomerAddress2,
+                            CustomerCity, CustomerState, CustomerZipcode, CustomerCountry,
+                            PaymentTermsID, DeliveryTermsID,
+                            SalesmanID, DeliveryNotes, CustomerTaxID
+                        FROM Tbl_Sales_Customers
+                        WHERE CustomerID = ?
+                    """, (cust_id,))
+                    crow = cur2.fetchone()
+                    ms.close()
+                    if crow:
+                        d['customer_details'] = {
+                            'name':          crow[0],
+                            'phone':         crow[1],
+                            'address1':      crow[2],
+                            'address2':      crow[3],
+                            'city':          crow[4],
+                            'state':         crow[5],
+                            'zipcode':       crow[6],
+                            'country':       crow[7],
+                            'payment_terms': crow[8],
+                            'delivery_terms':crow[9],
+                            'salesman_id':   crow[10],
+                            'delivery_notes':crow[11],
+                            'tax_id':        crow[12],
+                        }
+                except Exception as ex:
+                    log.warning(f'[API /orders/pending] MSSQL lookup failed: {ex}')
+            result.append(d)
+        return jsonify(result)
+    except Exception as e:
+        log.error(f'[API /orders/pending] {e}')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/orders/edit', methods=['POST'])
+def api_orders_edit():
+    """Update quantities, products, special instructions, or customer details for a pending order."""
+    data = request.json or {}
+    batch_id = data.get('batch_id')
+    lines = data.get('lines', [])
+    deleted_lines = data.get('deleted_lines', [])
+    special = data.get('special_instructions')
+    overrides = data.get('customer_overrides')
+
+    if not batch_id:
+        return jsonify({'error': 'Missing batch_id'}), 400
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        if special is not None:
+            cur.execute("UPDATE orders SET special_instructions = %s WHERE batch_id = %s", (special, batch_id))
+            
+        if overrides is not None:
+            cur.execute("UPDATE orders SET customer_overrides = %s WHERE batch_id = %s", (json.dumps(overrides), batch_id))
+            
+        if deleted_lines:
+            cur.execute("DELETE FROM orders WHERE id = ANY(%s) AND batch_id = %s", (deleted_lines, batch_id))
+            
+        for line in lines:
+            line_id = line.get('id')
+            qty = line.get('qty')
+            prod_id = line.get('product_id')
+            
+            if line_id is not None:
+                if qty is not None and prod_id is not None:
+                    cur.execute("UPDATE orders SET quantity = %s, product_id = %s WHERE id = %s AND batch_id = %s", (qty, prod_id, line_id, batch_id))
+                elif qty is not None:
+                    cur.execute("UPDATE orders SET quantity = %s WHERE id = %s AND batch_id = %s", (qty, line_id, batch_id))
+                elif prod_id is not None:
+                    cur.execute("UPDATE orders SET product_id = %s WHERE id = %s AND batch_id = %s", (prod_id, line_id, batch_id))
+                
+        conn.commit()
+        cur.close()
+        conn.close()
+        log.info(f"[API /orders/edit] Batch {batch_id[:8]} updated. Deleted {len(deleted_lines)} lines.")
+        return jsonify({'ok': True})
+    except Exception as e:
+        log.error(f'[API /orders/edit] {e}')
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/orders/confirm', methods=['POST'])
+def api_confirm_order():
+    """Push a pending order batch to MSSQL and mark it confirmed."""
+    data     = request.get_json() or {}
+    batch_id = data.get('batch_id')
+    if not batch_id:
+        return jsonify({'ok': False, 'error': 'batch_id required'}), 400
+    try:
+        conn = get_db_connection()
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT o.id, o.customer_id, c.name AS customer_name,
+                   o.product_id, p.name AS product_name, p.sku, p.price,
+                   o.quantity, o.special_instructions, o.needs_review,
+                   o.customer_overrides
+            FROM orders o
+            LEFT JOIN customers c ON o.customer_id = c.id
+            LEFT JOIN products  p ON o.product_id  = p.id
+            WHERE o.batch_id = %s AND o.status = 'pending_review';
+        """, (batch_id,))
+        rows = cur.fetchall()
+        if not rows:
+            cur.close()
+            conn.close()
+            return jsonify({'ok': False, 'error': 'Order not found or already processed'}), 404
+
+        # Reconstruct data structures for _push_to_mssql
+        customer = {'id': rows[0][1], 'name': rows[0][2]}
+        order_lines = []
+        for r in rows:
+            qty   = float(r[7]) if r[7] else 0
+            price = float(r[6]) if r[6] else 0.0
+            order_lines.append({
+                'product_id': r[3],
+                'item_name':  r[4] or 'Unknown',
+                'sku':        r[5] or 'UNKNOWN',
+                'qty':        qty,
+                'price':      price,
+                'total':      price * qty,
+                'notes':      'Confirmed via dashboard',
+            })
+        grand_total   = sum(l['total'] for l in order_lines)
+        special_instr = rows[0][8] or 'None'
+        overrides     = rows[0][10] if rows[0][10] else None
+
+        # Push to MSSQL
+        reply = _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, [], overrides=overrides)
+
+        # Mark all lines confirmed in local DB
+        order_ids = [r[0] for r in rows]
+        cur.execute(
+            "UPDATE orders SET status = 'confirmed' WHERE id = ANY(%s);",
+            (order_ids,)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        log.info(f'[DASHBOARD] Batch {batch_id[:8]} confirmed and pushed to MSSQL.')
+        return jsonify({'ok': True, 'reply': reply})
+    except Exception as e:
+        log.error(f'[API /orders/confirm] {e}')
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/orders/reject', methods=['POST'])
+def api_reject_order():
+    """Hard-delete a pending order batch (no trace kept)."""
+    data     = request.get_json() or {}
+    batch_id = data.get('batch_id')
+    if not batch_id:
+        return jsonify({'ok': False, 'error': 'batch_id required'}), 400
+    try:
+        conn = get_db_connection()
+        cur  = conn.cursor()
+        cur.execute("DELETE FROM orders WHERE batch_id = %s;", (batch_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        log.info(f'[DASHBOARD] Batch {batch_id[:8]} rejected and deleted.')
+        return jsonify({'ok': True})
+    except Exception as e:
+        log.error(f'[API /orders/reject] {e}')
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
 
 @app.route('/api/status')
 def api_status():
@@ -471,6 +729,21 @@ def api_stats():
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+@app.route('/api/products')
+def api_products():
+    """Return all known products for dropdown selection."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, sku, price FROM products ORDER BY name ASC")
+        prods = [{'id': r[0], 'name': r[1], 'sku': r[2], 'price': r[3]} for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return jsonify(prods)
+    except Exception as e:
+        log.error(f'[API /products] {e}')
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     log.info("=" * 60)
     log.info("  WhatsApp Order Webhook — Python Flask")

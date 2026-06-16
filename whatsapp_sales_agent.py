@@ -238,24 +238,35 @@ def parse_message(body):
     
     # Extract customer/company name
     company_name = None
-    # Pattern 1: "this is [Name] from [Company]" or "it's [Name] from [Company]"
-    m = re.search(r"(?:this is|it's)\s+([a-zA-Z0-9'\s]+)\s+from\s+([a-zA-Z0-9'\s]+)", body, re.IGNORECASE)
+    
+    # Pattern 0: "[Company] order:" or "[Company]:" at the start of the string
+    m = re.match(r"^([a-zA-Z0-9'\s]+?)(?:\s+order)?\s*:", body, re.IGNORECASE)
     if m:
-        company_name = m.group(2).strip()
+        company_name = m.group(1).strip()
     else:
-        # Pattern 2: "from [Company]"
-        m = re.search(r"from\s+([a-zA-Z0-9'\s]+)", body, re.IGNORECASE)
+        # Pattern 0.5: "para [Company] mañana..."
+        m = re.search(r"(?:para|for)\s+([a-zA-Z0-9'\s]+?)(?:\n|mañana|hoy|el\b|la\b|los|las|order|pedido|!|$)", body, re.IGNORECASE)
         if m:
             company_name = m.group(1).strip()
         else:
-            # Pattern 3: "this is [Company]" or "it's [Company]"
-            m = re.search(r"(?:this is|it's)\s+([a-zA-Z0-9'\s]+)", body, re.IGNORECASE)
+            # Pattern 1: "this is [Name] from [Company]" or "it's [Name] from [Company]"
+            m = re.search(r"(?:this is|it's)\s+([a-zA-Z0-9'\s]+)\s+from\s+([a-zA-Z0-9'\s]+)", body, re.IGNORECASE)
             if m:
-                company_name = m.group(1).strip()
+                company_name = m.group(2).strip()
+            else:
+                # Pattern 2: "from [Company]"
+                m = re.search(r"from\s+([a-zA-Z0-9'\s]+)", body, re.IGNORECASE)
+                if m:
+                    company_name = m.group(1).strip()
+                else:
+                    # Pattern 3: "this is [Company]" or "it's [Company]"
+                    m = re.search(r"(?:this is|it's)\s+([a-zA-Z0-9'\s]+)", body, re.IGNORECASE)
+                    if m:
+                        company_name = m.group(1).strip()
                 
     # Clean up company_name ending text (like "to be delivered" or "Thanks")
     if company_name:
-        for stop_word in ["to be", "deliver", "thanks", "need", "can you", "we want", "please"]:
+        for stop_word in ["to be", "deliver", "thanks", "need", "can you", "we want", "please", "mañana", "hoy"]:
             if f" {stop_word}" in company_name.lower():
                 idx = company_name.lower().index(f" {stop_word}")
                 company_name = company_name[:idx].strip()
@@ -308,9 +319,8 @@ def parse_message(body):
                 items.append({"name": item_name, "qty": qty})
             continue
 
-        # Pattern A: Quantity followed by units and item name (e.g. "5 cases of Vinegar, White Distilled 5%")
-        # Also handles "10 pounds of Oaxaca Cheese" or "3 boxes of Spicy Buffalo Wings" or "2 cases of White Vinegar"
-        m1 = re.search(r'\b(\d+(?:\.\d+)?)\s*(?:cases|units|bags|boxes|pounds|lbs|dozen|doz|pcs|pieces|cs|ea|lb)?\s*(?:of)?\s*([^.]+)', part, re.IGNORECASE)
+        # Pattern A: Quantity followed by units and item name (e.g. "5 cases of Vinegar", "X50# pastor")
+        m1 = re.search(r'(?:\b|[xX]\s*)(\d+(?:\.\d+)?)\s*(?:cases|units|bags|boxes|pounds|lbs|dozen|doz|pcs|pieces|cs|ea|lb|#)?\s*(?:of)?\s*([^.]+)', part, re.IGNORECASE)
         if m1:
             qty = float(m1.group(1))
             item_name = m1.group(2).strip()
@@ -366,14 +376,7 @@ def match_customer(conn, parsed_name, sender_phone, sql_audit):
     cols = [col[0] for col in cur.description]
     all_customers = [dict(zip(cols, row)) for row in cur.fetchall()]
 
-    # --- 1. Exact phone match (tolerates formatting garbage like '512=576-7097') ---
-    if sender_phone:
-        norm_sender = normalize_phone(sender_phone)
-        if norm_sender:
-            for c in all_customers:
-                if c["phone"] and normalize_phone(c["phone"]) == norm_sender:
-                    cur.close()
-                    return c, "HIGH", []
+    # --- 1. (REMOVED) Exact phone match removed because WhatsApp sender is the employee, not the customer ---
 
     # --- 2 + 3 + 4. Name / company text matching ---
     if parsed_name:
@@ -494,14 +497,43 @@ def _fetch_product_candidates(cur, item_name, cols):
             if d["id"] not in seen_ids:
                 seen_ids.add(d["id"])
                 candidates.append(d)
-    cur.execute("SELECT * FROM products WHERE LOWER(name) LIKE LOWER(%s) OR LOWER(sku) = LOWER(%s) OR LOWER(description) LIKE LOWER(%s) LIMIT 10;", (f"%{item_name}%", item_name, f"%{item_name}%"))
+                
+    # Quick SP->EN mapping for common items not in DB correctly
+    translations = {
+        "pulpo": "octopus",
+        "tuetano": "marrow",
+        "javon": "scour",
+        "jabon": "scour",
+        "limon": "lemon",
+        "cebolla": "onion",
+        "ajo": "garlic",
+        "queso": "cheese",
+        "fresa": "strawberry"
+    }
+    
+    # Translate query words if present
+    query_words = item_name.lower().split()
+    translated_words = [translations.get(w, w) for w in query_words]
+    translated_name = " ".join(translated_words)
+    
+    cur.execute("SELECT * FROM products WHERE LOWER(name) LIKE LOWER(%s) OR LOWER(sku) = LOWER(%s) OR LOWER(description) LIKE LOWER(%s) LIMIT 10;", (f"%{translated_name}%", item_name, f"%{translated_name}%"))
     add_rows(cur.fetchall())
-    expanded = normalize_text(item_name)
+    
+    expanded = normalize_text(translated_name)
     tokens = [t for t in expanded.split() if len(t) > 2 and t not in PRODUCT_NOISE]
+    
     for tok in tokens:
-        if len(candidates) >= 40: break
-        cur.execute("SELECT * FROM products WHERE LOWER(name) LIKE LOWER(%s) LIMIT 15;", (f"%{tok}%",))
+        if len(candidates) >= 60: break
+        # Try exact token
+        cur.execute("SELECT * FROM products WHERE LOWER(name) LIKE LOWER(%s) LIMIT 20;", (f"%{tok}%",))
         add_rows(cur.fetchall())
+        
+        # If token ends in 's', try singular (e.g. chips -> chip, thighs -> thigh)
+        if tok.endswith('s') and len(tok) > 3:
+            singular = tok[:-1]
+            cur.execute("SELECT * FROM products WHERE LOWER(name) LIKE LOWER(%s) LIMIT 20;", (f"%{singular}%",))
+            add_rows(cur.fetchall())
+
     return candidates
 
 def match_item(conn, item_name, customer_history, sql_audit):
@@ -515,9 +547,18 @@ def match_item(conn, item_name, customer_history, sql_audit):
       3. Fuzzy scoring (token F1 + SequenceMatcher) across catalog candidates.
     """
     import difflib
-    item_lower   = item_name.strip().lower()
-    query_tokens = token_set(item_name, noise=PRODUCT_NOISE)
-    query_norm   = normalize_text(item_name)
+    
+    translations = {
+        "pulpo": "octopus", "tuetano": "marrow", "javon": "scour", 
+        "jabon": "scour", "limon": "lemon", "cebolla": "onion", 
+        "ajo": "garlic", "queso": "cheese", "fresa": "strawberry"
+    }
+    translated_words = [translations.get(w, w) for w in item_name.lower().split()]
+    translated_name = " ".join(translated_words)
+    
+    item_lower   = translated_name.strip()
+    query_tokens = token_set(translated_name, noise=PRODUCT_NOISE)
+    query_norm   = normalize_text(translated_name)
 
     # ── PASS 1: Customer history (before any catalog query) ───────────────────
     if customer_history:
@@ -539,8 +580,8 @@ def match_item(conn, item_name, customer_history, sql_audit):
     cur = conn.cursor()
     cur.execute("SELECT * FROM products LIMIT 0;")
     cols = [col[0] for col in cur.description]
-    sql_audit.append(f"EXECUTE: multi-pass candidate fetch for '{item_name}'")
-    candidates = _fetch_product_candidates(cur, item_name, cols)
+    sql_audit.append(f"EXECUTE: multi-pass candidate fetch for '{translated_name}'")
+    candidates = _fetch_product_candidates(cur, translated_name, cols)
     cur.close()
 
     # Pass 2: Exact SKU or exact name
