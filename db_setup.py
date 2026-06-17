@@ -63,6 +63,8 @@ def create_tables(conn):
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
+    cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS uom VARCHAR(50);")
+    cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS qty_per_case NUMERIC(10, 2);")
     
     # orders table
     cur.execute("""
@@ -127,6 +129,7 @@ def sync_data(pg_conn):
       m.PartNo, 
       m.MaterialDescription, 
       m.UM, 
+      m.PoundsPerCs,
       COALESCE(
         (SELECT TOP 1 sod.UnitPrice 
          FROM Tbl_Sales_SalesOrder_Details sod 
@@ -141,7 +144,7 @@ def sync_data(pg_conn):
     
     count_prod = 0
     for row in products:
-        pid, sku, name, um, price = row
+        pid, sku, name, um, lbs_per_cs, price = row
         if not name:
             name = f"Material #{pid}"
         if not sku:
@@ -150,10 +153,12 @@ def sync_data(pg_conn):
         if price_val <= 0:
             price_val = 10.00 # fallback
         
+        qty_per_case = float(lbs_per_cs) if lbs_per_cs else 1.0
+        
         # Insert or update
         pg_cur.execute(
-            "INSERT INTO products (id, name, sku, description, price) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-            (pid, name, sku, f"UM: {um}", price_val)
+            "INSERT INTO products (id, name, sku, description, price, uom, qty_per_case) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+            (pid, name, sku, f"UM: {um}", price_val, um, qty_per_case)
         )
         count_prod += 1
     print(f"Synced {count_prod} products.")

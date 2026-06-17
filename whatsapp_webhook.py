@@ -184,17 +184,40 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
             has_errors = True
 
         if product:
-            log.info(f"    -> {product['name']} (SKU: {product['sku']}, ${product['price']:.2f})")
+            product_uom = product.get('uom') or 'CASE (CS)'
+            qty_per_case = float(product.get('qty_per_case') or 1.0)
+            
+            ordered_qty = float(item['qty'])
+            
+            # Figure out real quantity based on UM
+            if 'LB' in product_uom.upper() or 'POUND' in product_uom.upper():
+                # If they ordered by CASE, calculate pounds
+                if item.get('uom', '').upper() in ['CASE', 'CASES', 'CS', 'CSE']:
+                    cases = ordered_qty
+                    real_qty = cases * qty_per_case
+                else:
+                    # They ordered directly by LBS, so that's the real qty
+                    real_qty = ordered_qty
+                    cases = real_qty / qty_per_case if qty_per_case > 0 else 0
+                
+                price_multiplier = real_qty
+            else:
+                # If they ordered by piece or case, price is usually per case/piece
+                cases = ordered_qty
+                real_qty = cases * qty_per_case
+                price_multiplier = cases
+                
+            log.info(f"    -> {product['name']} (SKU: {product['sku']}, ${product['price']:.2f}) [Cases: {cases}, RealQty: {real_qty}]")
             order_lines.append({
                 "product_id": product['id'],
                 "item_name":  product['name'],
                 "original_name": item['name'],
                 "sku":        product['sku'],
-                "qty":        item['qty'],
+                "qty":        cases,
                 "uom":        item.get('uom', 'EA'),
-                "secondary_qty": item.get('secondary_qty', 0.0),
+                "secondary_qty": real_qty,
                 "price":      float(product['price']),
-                "total":      float(product['price']) * item['qty'],
+                "total":      float(product['price']) * price_multiplier,
                 "notes":      ", ".join(item_flags) if item_flags else "Matched directly",
             })
         else:
@@ -235,13 +258,25 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
             "direct" not in line['notes'].lower() and
             "history" not in line['notes'].lower()
         )
+        
+        qty = line['qty']
+        sec_qty = line.get('secondary_qty', 0.0)
+        
+        if qty > 9999999.99:
+            qty = 9999999.99
+            needs_review = True
+            
+        if sec_qty > 9999999.99:
+            sec_qty = 9999999.99
+            needs_review = True
+            
         cur.execute(
             "INSERT INTO orders (customer_id, product_id, quantity, raw_message, source, status, "
             "                   special_instructions, created_at, needs_review, batch_id,"
             "                   sender_name, sender_phone, line_note, uom, secondary_qty) "
             "VALUES (%s, %s, %s, %s, 'whatsapp', 'pending_review', %s, NOW(), %s, %s, %s, %s, %s, %s, %s);",
-            (customer['id'], line['product_id'], line['qty'], text,
-             special_instr, needs_review, batch_id, sender_name, sender_phone, line['original_name'], line['uom'], line['secondary_qty'])
+            (customer['id'], line['product_id'], qty, text,
+             special_instr, needs_review, batch_id, sender_name, sender_phone, line['original_name'], line['uom'], sec_qty)
         )
     conn.commit()
     cur.close()
@@ -371,18 +406,8 @@ def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flag
         for idx, line in enumerate(order_lines, 1):
             if line['product_id']:
                 uom_raw = line.get('uom', 'EA').upper()
-                qty = float(line.get('qty', 0.0))
-                sec_qty = float(line.get('secondary_qty', 0.0))
-                
-                if uom_raw in ['CSE', 'CASE', 'CS']:
-                    qty_cs = qty
-                    qty_lb = sec_qty
-                elif uom_raw in ['LB', 'LBS']:
-                    qty_cs = 0.0
-                    qty_lb = qty
-                else:
-                    qty_cs = 0.0
-                    qty_lb = qty
+                qty_cs = float(line.get('qty', 0.0))
+                qty_lb = float(line.get('secondary_qty', 0.0))
                     
                 # Use the product's designated UofM from the database
                 uom_db = line.get('product_uom', 'CASE (CS)')
@@ -736,15 +761,16 @@ def api_orders():
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
-            SELECT o.id,
+            SELECT COALESCE(LEFT(MAX(o.batch_id::text), 8), MAX(o.id)::text) AS id,
                    COALESCE(c.name, 'Unknown')  AS customer,
-                   COALESCE(p.name, '—')        AS product,
-                   o.quantity, o.status, o.needs_review,
-                   o.raw_message, o.created_at
+                   CASE WHEN o.status = 'non_order' THEN '—' ELSE COUNT(o.id)::text || ' item(s)' END AS product,
+                   SUM(o.quantity) AS quantity, 
+                   o.status, bool_or(o.needs_review) AS needs_review,
+                   MIN(o.raw_message) AS raw_message, MIN(o.created_at) AS created_at
             FROM orders o
             LEFT JOIN customers c ON o.customer_id = c.id
-            LEFT JOIN products  p ON o.product_id  = p.id
-            ORDER BY o.created_at DESC LIMIT 50;
+            GROUP BY COALESCE(o.batch_id::text, o.id::text), c.name, o.status
+            ORDER BY MIN(o.created_at) DESC LIMIT 50;
         """)
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
@@ -772,8 +798,8 @@ def api_stats():
         cur = conn.cursor()
         cur.execute("""
             SELECT
-                (SELECT COUNT(*) FROM orders WHERE created_at::date = CURRENT_DATE) AS orders_today,
-                (SELECT COUNT(*) FROM orders WHERE needs_review = TRUE)             AS needs_review,
+                (SELECT COUNT(DISTINCT batch_id) FROM orders WHERE created_at::date = CURRENT_DATE AND batch_id IS NOT NULL) AS orders_today,
+                (SELECT COUNT(DISTINCT batch_id) FROM orders WHERE status = 'pending_review' AND batch_id IS NOT NULL) AS needs_review,
                 (SELECT COUNT(*) FROM customers)                                    AS customers,
                 (SELECT COUNT(*) FROM products)                                     AS products;
         """)

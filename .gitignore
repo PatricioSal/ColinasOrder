@@ -84,3 +84,7 @@ test_matching.py
 debug_*.py
 scratch_*.py
 WhatsAppRecieve.py
+*.pdf
+*.PDF
+PDF_TEST/
+BEK_text.txt

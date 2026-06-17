@@ -284,10 +284,83 @@ def parse_aspen_pdf(body):
         "special_instructions": "Extracted from Aspen PDF"
     }
 
+# Ben E. Keith PDF Parser
+def parse_bek_pdf(body):
+    lines = [l.strip() for l in body.split('\n') if l.strip()]
+    items = []
+    company_name = "Ben E. Keith"
+    
+    for line in lines:
+        # Match lines like: "  1010        222819  90850023422074  COLINAS   1/30LB         BEEF HIND SHANK SL 1/2 IN             5    4.82000      795.30"
+        m = re.match(r'^\s*([A-Za-z0-9\-]+)\s+(\d+)\s+(\d{10,15})\s+(.+?)\s+([A-Za-z0-9/\.\-]+)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+\d+\.\d+\s+[\d\.,]+$', line, re.IGNORECASE)
+        if m:
+            sku = m.group(1)
+            item_name = m.group(6).strip()
+            qty = float(m.group(7))
+            uom = "CS"
+            
+            if item_name:
+                items.append({
+                    "name": item_name, 
+                    "qty": qty,
+                    "sku": sku,
+                    "uom": uom,
+                    "secondary_qty": 0.0
+                })
+                
+    return {
+        "message_type": "order" if items else "non_order",
+        "company_name": company_name,
+        "items": items,
+        "delivery_info": None,
+        "special_instructions": "Extracted from Ben E. Keith PDF"
+    }
+
+# US Foods PDF Parser
+def parse_usfoods_pdf(body):
+    lines = [l.strip() for l in body.split('\n') if l.strip()]
+    items = []
+    company_name = "US Foods"
+    
+    for line in lines:
+        # Match lines like: "20 CASES   1009            BEEF, COW FEET SLCD RAW FZN           3.40                           3.40"
+        m = re.match(r'^(\d+(?:\.\d+)?)\s+(CASES|CASE|LBS|LB|CS|CSE|EA)\s+([A-Za-z0-9\-]+)\s+(.+)$', line, re.IGNORECASE)
+        if m:
+            qty = float(m.group(1))
+            uom = m.group(2).upper()
+            sku = m.group(3)
+            raw_desc = m.group(4).strip()
+            
+            # strip trailing prices/numbers like "3.40    3.40"
+            item_name = re.sub(r'(?:\s+[\d\.,]+)+$', '', raw_desc).strip()
+            
+            if item_name:
+                items.append({
+                    "name": item_name, 
+                    "qty": qty,
+                    "sku": sku,
+                    "uom": uom,
+                    "secondary_qty": 0.0
+                })
+                
+    return {
+        "message_type": "order" if items else "non_order",
+        "company_name": company_name,
+        "items": items,
+        "delivery_info": None,
+        "special_instructions": "Extracted from US Foods PDF"
+    }
+
 # NLP and Regex Parser
 def parse_message(body):
     if "aspen-systems.com" in body.lower() or ("Product Code" in body and "Order Qty" in body):
         return parse_aspen_pdf(body)
+        
+    if "us foods" in body.lower() or "usf purchase order" in body.lower():
+        return parse_usfoods_pdf(body)
+        
+    if "ben e. keith" in body.lower() or "ben e keith" in body.lower():
+        return parse_bek_pdf(body)
 
     body_lower = body.lower()
     
@@ -618,7 +691,8 @@ def match_item(conn, item_name, customer_history, sql_audit, sku=None):
     """
     if sku:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM products WHERE LOWER(sku) = LOWER(%s) LIMIT 1;", (sku,))
+        sku_padded = "0" + sku if not sku.startswith("0") else sku
+        cur.execute("SELECT * FROM products WHERE LOWER(sku) = LOWER(%s) OR LOWER(sku) = LOWER(%s) LIMIT 1;", (sku, sku_padded))
         if cur.description:
             cols = [col[0] for col in cur.description]
             row = cur.fetchone()
