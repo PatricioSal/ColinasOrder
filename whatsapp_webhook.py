@@ -132,6 +132,43 @@ def webhook():
         error_reply = "Sorry, there was an error processing your order. Please contact the sales team."
         return jsonify({"ok": False, "reply": error_reply})
 
+def _get_mssql_customer_price(mssql_customer_id, mssql_material_id, fallback_price):
+    try:
+        import pyodbc
+        ms = pyodbc.connect(MSSQL_CONN_STR, timeout=3)
+        cur = ms.cursor()
+        
+        # 1. Get PriceListID and TierNo
+        cur.execute("SELECT PriceListID, PreiceListID_TierNo FROM Tbl_Sales_Customers WHERE CustomerID = ?", (mssql_customer_id,))
+        cust_row = cur.fetchone()
+        if not cust_row or not cust_row.PriceListID:
+            ms.close()
+            return fallback_price
+            
+        price_list_id = cust_row.PriceListID
+        tier_no = cust_row.PreiceListID_TierNo or 0
+        
+        # 2. Get the corresponding Price column based on TierNo
+        cur.execute("SELECT Price, Price1, Price2 FROM Tbl_Sales_PriceLists_Materials WHERE PriceListID = ? AND MaterialID = ?", (price_list_id, mssql_material_id))
+        pl_row = cur.fetchone()
+        ms.close()
+        
+        if not pl_row:
+            return fallback_price
+            
+        if tier_no == 1 and pl_row.Price1 is not None and float(pl_row.Price1) > 0:
+            return float(pl_row.Price1)
+        elif tier_no == 2 and pl_row.Price2 is not None and float(pl_row.Price2) > 0:
+            return float(pl_row.Price2)
+        elif pl_row.Price is not None and float(pl_row.Price) > 0:
+            return float(pl_row.Price)
+            
+        return fallback_price
+    except Exception as e:
+        log.error(f"  [MSSQL Price Lookup Error] {e}")
+        return fallback_price
+
+
 # ── Order Processing ──────────────────────────────────────────────────────────
 def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) -> str:
     """
@@ -207,7 +244,9 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
                 real_qty = cases * qty_per_case
                 price_multiplier = cases
                 
-            log.info(f"    -> {product['name']} (SKU: {product['sku']}, ${product['price']:.2f}) [Cases: {cases}, RealQty: {real_qty}]")
+            true_price = _get_mssql_customer_price(customer['id'], product['id'], float(product['price']))
+
+            log.info(f"    -> {product['name']} (SKU: {product['sku']}, ${true_price:.2f}) [Cases: {cases}, RealQty: {real_qty}]")
             order_lines.append({
                 "product_id": product['id'],
                 "item_name":  product['name'],
@@ -216,8 +255,8 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
                 "qty":        cases,
                 "uom":        item.get('uom', 'EA'),
                 "secondary_qty": real_qty,
-                "price":      float(product['price']),
-                "total":      float(product['price']) * price_multiplier,
+                "price":      true_price,
+                "total":      true_price * price_multiplier,
                 "notes":      ", ".join(item_flags) if item_flags else "Matched directly",
             })
         else:
@@ -252,7 +291,9 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
     cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_overrides JSONB;")
     cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS line_note TEXT;")
     cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS uom VARCHAR(50);")
-    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS secondary_qty NUMERIC;")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity_cs NUMERIC;")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity NUMERIC;")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS unit_price NUMERIC(10, 2);")
     for line in order_lines:
         needs_review = has_errors or (
             "direct" not in line['notes'].lower() and
@@ -271,12 +312,12 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
             needs_review = True
             
         cur.execute(
-            "INSERT INTO orders (customer_id, product_id, quantity, raw_message, source, status, "
+            "INSERT INTO orders (customer_id, product_id, quantity_cs, raw_message, source, status, "
             "                   special_instructions, created_at, needs_review, batch_id,"
-            "                   sender_name, sender_phone, line_note, uom, secondary_qty) "
-            "VALUES (%s, %s, %s, %s, 'whatsapp', 'pending_review', %s, NOW(), %s, %s, %s, %s, %s, %s, %s);",
+            "                   sender_name, sender_phone, line_note, uom, quantity, unit_price) "
+            "VALUES (%s, %s, %s, %s, 'whatsapp', 'pending_review', %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s);",
             (customer['id'], line['product_id'], qty, text,
-             special_instr, needs_review, batch_id, sender_name, sender_phone, line['original_name'], line['uom'], sec_qty)
+             special_instr, needs_review, batch_id, sender_name, sender_phone, line['original_name'], line['uom'], sec_qty, line['price'])
         )
     conn.commit()
     cur.close()
@@ -417,17 +458,22 @@ def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flag
                 cost_row = cur.fetchone()
                 unit_cost = float(cost_row[0]) if cost_row and cost_row[0] is not None else 0.0
 
+                unit_price = float(line['price'])
+                margin = (unit_price - unit_cost) / unit_price if unit_price > 0 else 0.0
+
                 cur.execute("""
                     INSERT INTO Tbl_Sales_SalesOrder_Details (
                         SalesOrderID, ItemNo, MaterialID, PartNo, Description,
-                        QuantityCs, Quantity,
-                        UnitPrice, Amount, UofM, IsTaxable, UnitCost, Notes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                        QuantityCs, Quantity, QuantityBalance,
+                        UnitPriceList, UnitPrice, Amount, UofM, 
+                        IsTaxable, UnitCost, Margin, RealCost, RealMargin, Notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
                 """, (
                     sales_order_id, idx, line['product_id'],
                     line['sku'][:50], line['item_name'][:200],
-                    qty_cs, qty_lb,
-                    line['price'], line['total'], uom_db, unit_cost,
+                    qty_cs, qty_lb, qty_lb,
+                    unit_price, unit_price, line['total'], uom_db, 
+                    unit_cost, margin, 0.0, 0.0,
                     line['notes'][:100]
                 ))
 
@@ -509,9 +555,14 @@ def api_orders_pending():
                     'id',        o.id,
                     'product',   COALESCE(p.name, o.id::text),
                     'sku',       COALESCE(p.sku, 'UNKNOWN'),
-                    'qty',       o.quantity,
-                    'price',     COALESCE(p.price, 0),
-                    'total',     COALESCE(p.price * o.quantity, 0),
+                    'qty',       o.quantity_cs,
+                    'secondary_qty', o.quantity,
+                    'price',     COALESCE(o.unit_price, p.price, 0),
+                    'total',     COALESCE(
+                        CASE WHEN UPPER(p.uom) LIKE '%%LB%%' OR UPPER(p.uom) LIKE '%%POUND%%' 
+                             THEN COALESCE(o.unit_price, p.price, 0) * o.quantity 
+                             ELSE COALESCE(o.unit_price, p.price, 0) * o.quantity_cs 
+                        END, 0),
                     'line_note', o.line_note
                 ) ORDER BY o.id) AS lines
             FROM orders o
@@ -613,9 +664,27 @@ def api_orders_edit():
             if line_id is not None:
                 updates = []
                 params = []
+                
+                # We need to fetch product info so we can recalculate secondary_qty if qty changes
+                target_prod_id = prod_id
+                if target_prod_id is None:
+                    cur.execute("SELECT product_id FROM orders WHERE id = %s", (line_id,))
+                    row = cur.fetchone()
+                    target_prod_id = row[0] if row else None
+                    
+                pqpc = 1.0
+                if target_prod_id:
+                    cur.execute("SELECT qty_per_case FROM products WHERE id = %s", (target_prod_id,))
+                    prow = cur.fetchone()
+                    if prow and prow[0]:
+                        pqpc = float(prow[0])
+                
                 if qty is not None:
-                    updates.append("quantity = %s")
+                    updates.append("quantity_cs = %s")
                     params.append(qty)
+                    updates.append("quantity = %s")
+                    params.append(float(qty) * pqpc)
+                    
                 if prod_id is not None:
                     updates.append("product_id = %s")
                     params.append(prod_id)
@@ -650,8 +719,8 @@ def api_confirm_order():
         cur.execute("""
             SELECT o.id, o.customer_id, c.name AS customer_name,
                    o.product_id, p.name AS product_name, p.sku, p.price,
-                   o.quantity, o.special_instructions, o.needs_review,
-                   o.customer_overrides, o.uom, o.secondary_qty, p.description
+                   o.quantity_cs, o.special_instructions, o.needs_review,
+                   o.customer_overrides, o.uom, o.quantity, p.description, o.unit_price
             FROM orders o
             LEFT JOIN customers c ON o.customer_id = c.id
             LEFT JOIN products  p ON o.product_id  = p.id
@@ -668,7 +737,7 @@ def api_confirm_order():
         order_lines = []
         for r in rows:
             qty   = float(r[7]) if r[7] else 0
-            price = float(r[6]) if r[6] else 0.0
+            price = float(r[14]) if r[14] is not None else (float(r[6]) if r[6] is not None else 0.0)
             
             desc = r[13] or ""
             product_uom = desc.replace("UM: ", "").strip() if desc.startswith("UM: ") else "CASE (CS)"
@@ -678,11 +747,11 @@ def api_confirm_order():
                 'item_name':  r[4] or 'Unknown',
                 'sku':        r[5] or 'UNKNOWN',
                 'qty':        qty,
+                'secondary_qty': float(r[12]) if r[12] else 0.0,
                 'price':      price,
-                'total':      price * qty,
+                'total':      price * (float(r[12]) if ('LB' in product_uom.upper() or 'POUND' in product_uom.upper()) and r[12] else qty),
                 'notes':      'Confirmed via dashboard',
                 'uom':        r[11] or 'EA',
-                'secondary_qty': float(r[12]) if r[12] else 0.0,
                 'product_uom': product_uom
             })
         grand_total   = sum(l['total'] for l in order_lines)

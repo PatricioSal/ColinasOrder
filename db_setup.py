@@ -72,7 +72,7 @@ def create_tables(conn):
         id SERIAL PRIMARY KEY,
         customer_id INT REFERENCES customers(id),
         product_id INT REFERENCES products(id),
-        quantity NUMERIC(10, 2),
+        quantity_cs NUMERIC(10, 2),
         raw_message TEXT NOT NULL,
         source VARCHAR(50) NOT NULL DEFAULT 'whatsapp',
         status VARCHAR(50) NOT NULL DEFAULT 'pending_review',
@@ -81,6 +81,35 @@ def create_tables(conn):
         needs_review BOOLEAN NOT NULL DEFAULT TRUE
     );
     """)
+    
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity NUMERIC;")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_id UUID;")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS sender_name VARCHAR(200);")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS sender_phone VARCHAR(50);")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_overrides JSONB;")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS line_note TEXT;")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS uom VARCHAR(50);")
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS unit_price NUMERIC(10, 2);")
+    
+    # Run rename scripts if columns have the old names
+    cur.execute("""
+    DO $$
+    BEGIN
+        IF EXISTS(SELECT * FROM information_schema.columns WHERE table_name='orders' AND column_name='quantity') AND
+           NOT EXISTS(SELECT * FROM information_schema.columns WHERE table_name='orders' AND column_name='quantity_cs') THEN
+            ALTER TABLE orders RENAME COLUMN quantity TO quantity_cs;
+        END IF;
+    END $$;
+    """)
+    cur.execute("""
+    DO $$
+    BEGIN
+        IF EXISTS(SELECT * FROM information_schema.columns WHERE table_name='orders' AND column_name='secondary_qty') AND
+           NOT EXISTS(SELECT * FROM information_schema.columns WHERE table_name='orders' AND column_name='quantity') THEN
+            ALTER TABLE orders RENAME COLUMN secondary_qty TO quantity;
+        END IF;
+    END $$;
+    """);
     
     conn.commit()
     cur.close()

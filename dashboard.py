@@ -11,7 +11,9 @@ Requires:  pip install customtkinter requests
 
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog, messagebox
+import base64
+from datetime import datetime
 import subprocess
 import threading
 import time
@@ -250,11 +252,13 @@ class App(ctk.CTk):
 
         tabs.add("  Dashboard  ")
         tabs.add(self._review_tab_name)
+        tabs.add("  Direct Entry  ")
         tabs.add("  Groups  ")
         tabs.add("  Live Logs  ")
 
         self._build_tab_dashboard(tabs.tab("  Dashboard  "))
         self._build_tab_review(tabs.tab(self._review_tab_name))
+        self._build_tab_direct_entry(tabs.tab("  Direct Entry  "))
         self._build_tab_groups(tabs.tab("  Groups  "))
         self._build_tab_logs(tabs.tab("  Live Logs  "))
 
@@ -508,7 +512,7 @@ class App(ctk.CTk):
         lines_frame.columnconfigure(0, weight=1)
         lines_frame.columnconfigure((1, 2, 3), weight=0)
 
-        hdr_defs = [("Product", "w"), ("SKU", "center"), ("Qty", "center"), ("Total", "e")]
+        hdr_defs = [("Product", "w"), ("SKU", "center"), ("Cases | Lbs", "center"), ("Total", "e")]
         for col, (htext, anchor) in enumerate(hdr_defs):
             ctk.CTkLabel(lines_frame, text=htext.upper(), font=ctk.CTkFont(size=9, weight="bold"), text_color=TEXT3, anchor=anchor).grid(row=0, column=col, sticky="ew", pady=(0, 2))
 
@@ -516,13 +520,16 @@ class App(ctk.CTk):
             product = line.get("product", "Unknown")
             sku     = line.get("sku", "—")
             qty     = line.get("qty", 0)
+            sec_qty = line.get("secondary_qty", 0)
             total   = float(line.get("total", 0))
             unknown = sku == "UNKNOWN"
             row_color = WARN if unknown else TEXT
 
+            qty_str = f"{qty} | {sec_qty}" if sec_qty else str(qty)
+
             ctk.CTkLabel(lines_frame, text=self._trunc(product, 40), font=ctk.CTkFont(size=12), text_color=row_color, anchor="w").grid(row=r, column=0, sticky="ew", pady=1)
             ctk.CTkLabel(lines_frame, text=sku, font=ctk.CTkFont(size=12), text_color=TEXT2, anchor="center").grid(row=r, column=1, sticky="ew", padx=8, pady=1)
-            ctk.CTkLabel(lines_frame, text=str(qty), font=ctk.CTkFont(size=12), text_color=TEXT, anchor="center").grid(row=r, column=2, sticky="ew", padx=8, pady=1)
+            ctk.CTkLabel(lines_frame, text=qty_str, font=ctk.CTkFont(size=12), text_color=TEXT, anchor="center").grid(row=r, column=2, sticky="ew", padx=8, pady=1)
             ctk.CTkLabel(lines_frame, text=f"${total:,.2f}", font=ctk.CTkFont(size=12), text_color=TEXT, anchor="e").grid(row=r, column=3, sticky="ew", pady=1)
 
         ctk.CTkFrame(lines_frame, height=1, fg_color=BORDER).grid(row=len(lines)+1, column=0, columnspan=4, sticky="ew", pady=(4, 2))
@@ -591,7 +598,7 @@ class App(ctk.CTk):
             entry = ctk.CTkEntry(top_part, textvariable=prod_name_var, width=280)
             entry.pack(side="left", padx=10, pady=10)
 
-            ctk.CTkLabel(top_part, text="Qty:", font=ctk.CTkFont(size=12), text_color=TEXT2).pack(side="left", padx=5)
+            ctk.CTkLabel(top_part, text="Cases:", font=ctk.CTkFont(size=12), text_color=TEXT2).pack(side="left", padx=5)
             qty_entry = ctk.CTkEntry(top_part, width=60, justify="center")
             qty_entry.insert(0, str(line.get("qty", 0)))
             qty_entry.pack(side="left")
@@ -797,6 +804,125 @@ class App(ctk.CTk):
                 self._review_badge.configure(text=txt)
             except Exception:
                 pass
+
+    # ── Direct Entry tab ───────────────────────────────────────────────────────
+    def _build_tab_direct_entry(self, parent):
+        parent.configure(fg_color=BG)
+        
+        self._direct_pdf_path = None
+        
+        container = ctk.CTkFrame(parent, fg_color="transparent")
+        container.pack(fill="both", expand=True, pady=10)
+        container.columnconfigure(0, weight=2)
+        container.columnconfigure(1, weight=1)
+
+        # Left Column (Input)
+        left_col = ctk.CTkFrame(container, fg_color="transparent")
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+
+        ctk.CTkLabel(left_col, text="Enter Order Text:", 
+                     font=ctk.CTkFont(size=14, weight="bold"), text_color=TEXT).pack(anchor="w", pady=(0, 5))
+        
+        self._direct_text = ctk.CTkTextbox(left_col, height=250, fg_color=CARD, text_color=TEXT, 
+                                          border_width=1, border_color=BORDER)
+        self._direct_text.pack(fill="x", pady=(0, 15))
+
+        pdf_frame = ctk.CTkFrame(left_col, fg_color="transparent")
+        pdf_frame.pack(fill="x", pady=(0, 15))
+        
+        ctk.CTkButton(pdf_frame, text="📎 Attach PDF", fg_color=CARD, border_width=1, border_color=BORDER, 
+                      text_color=TEXT, hover_color=SURFACE, command=self._attach_pdf).pack(side="left", padx=(0, 10))
+        self._direct_pdf_lbl = ctk.CTkLabel(pdf_frame, text="No PDF selected", text_color=TEXT3)
+        self._direct_pdf_lbl.pack(side="left")
+
+        ctk.CTkButton(left_col, text="Submit Order", fg_color=GREEN, hover_color=GREEN_D, text_color=BG,
+                      font=ctk.CTkFont(weight="bold"), command=self._submit_direct_entry).pack(fill="x")
+                      
+        self._direct_status_lbl = ctk.CTkLabel(left_col, text="", text_color=TEXT)
+        self._direct_status_lbl.pack(pady=(5, 0))
+
+        # Right Column (Format Instructions)
+        right_col = ctk.CTkFrame(container, fg_color=CARD, corner_radius=10, border_width=1, border_color=BORDER)
+        right_col.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        
+        ctk.CTkLabel(right_col, text="💡 Best Format Example", font=ctk.CTkFont(size=14, weight="bold"), 
+                     text_color=TEXT).pack(anchor="w", padx=16, pady=(16, 10))
+                     
+        example_text = (
+            "Customer: EL BUEN SAZON\n\n"
+            "1010 BEEF HIND SHANK SL 1/2 IN x5\n"
+            "1009 BEEF FEET CUT x100\n"
+            "1007 BEEF TRIPE CUT 1X1 x60\n\n"
+            "Delivery: Monday morning\n\n"
+            "---\n"
+            "Note: You can also just upload a PDF and leave the text blank! It will parse the PDF perfectly."
+        )
+        ex_lbl = ctk.CTkTextbox(right_col, fg_color="transparent", text_color=TEXT2)
+        ex_lbl.insert("1.0", example_text)
+        ex_lbl.configure(state="disabled")
+        ex_lbl.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+    def _attach_pdf(self):
+        filepath = filedialog.askopenfilename(
+            title="Select PDF Order",
+            filetypes=[("PDF Files", "*.pdf"), ("All Files", "*.*")]
+        )
+        if filepath:
+            self._direct_pdf_path = filepath
+            self._direct_pdf_lbl.configure(text=os.path.basename(filepath), text_color=GREEN)
+
+    def _show_direct_status(self, msg, color=GREEN):
+        self._direct_status_lbl.configure(text=msg, text_color=color)
+        if hasattr(self, "_direct_status_timer") and self._direct_status_timer:
+            self.after_cancel(self._direct_status_timer)
+        self._direct_status_timer = self.after(5000, lambda: self._direct_status_lbl.configure(text=""))
+
+    def _submit_direct_entry(self):
+        text = self._direct_text.get("1.0", "end-1c").strip()
+        pdf_path = getattr(self, "_direct_pdf_path", None)
+        
+        if not text and not pdf_path:
+            self._show_direct_status("Please enter order text or attach a PDF.", ERROR)
+            return
+            
+        pdf_base64 = None
+        pdf_name = None
+        if pdf_path:
+            try:
+                with open(pdf_path, "rb") as f:
+                    pdf_base64 = base64.b64encode(f.read()).decode('utf-8')
+                pdf_name = os.path.basename(pdf_path)
+            except Exception as e:
+                self._show_direct_status(f"Could not read PDF: {e}", ERROR)
+                return
+
+        payload = {
+            "sender_phone": "+10000000000",
+            "sender_name": "Direct Entry",
+            "body": text,
+            "chat_id": "direct@c.us",
+            "is_group": False,
+            "timestamp": datetime.now().isoformat() + "Z",
+            "has_pdf": bool(pdf_path),
+            "pdf_data": pdf_base64,
+            "pdf_name": pdf_name
+        }
+        
+        # We start a thread so the UI doesn't freeze while waiting for the webhook
+        def _send():
+            try:
+                resp = requests.post(f"{FLASK_URL}/webhook", json=payload, timeout=20)
+                if resp.status_code == 200:
+                    self.after(0, lambda: self._show_direct_status("✓ Order submitted to Pending!", GREEN))
+                    self.after(0, lambda: self._direct_text.delete("1.0", "end"))
+                    self._direct_pdf_path = None
+                    self.after(0, lambda: self._direct_pdf_lbl.configure(text="No PDF selected", text_color=TEXT3))
+                else:
+                    self.after(0, lambda: self._show_direct_status(f"Webhook Error {resp.status_code}", ERROR))
+            except Exception as e:
+                self.after(0, lambda: self._show_direct_status(f"Connection Error: {e}", ERROR))
+                
+        threading.Thread(target=_send, daemon=True).start()
 
     # ── Groups tab ─────────────────────────────────────────────────────────────
     def _build_tab_groups(self, parent):

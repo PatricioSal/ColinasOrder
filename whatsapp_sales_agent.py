@@ -453,7 +453,7 @@ def parse_message(body):
         
         # Pattern B: Item name followed by standalone 'x' and quantity (e.g. "Laurel Molido x 10")
         # Run FIRST — more specific than Pattern A. Uses \bx\b so 'x' inside words is safe.
-        m2 = re.search(r'^(.+?)\s+\bx\b\s*(\d+(?:\.\d+)?)\s*$', part.strip(), re.IGNORECASE)
+        m2 = re.search(r'^(.+?)\s+(?:x|X)\s*(\d+(?:\.\d+)?)\s*$', part.strip(), re.IGNORECASE)
         if m2:
             item_name = m2.group(1).strip().rstrip("?").strip()
             qty = float(m2.group(2))
