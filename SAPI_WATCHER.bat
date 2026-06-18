@@ -41,7 +41,13 @@ if %errorlevel% neq 0 (
 )
 
 pushd src
-call npm install --no-audit --no-fund --loglevel=error
+call npm install --no-audit --no-fund
+if %errorlevel% neq 0 (
+    echo [Warning] npm install failed. Retrying clean install (removing package-lock.json)...
+    if exist "package-lock.json" del /f /q package-lock.json
+    if exist "node_modules" rmdir /s /q node_modules
+    call npm install --no-audit --no-fund
+)
 popd
 if %errorlevel% neq 0 (
     echo [Warning] Node.js package installation returned an error.

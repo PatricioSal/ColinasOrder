@@ -37,20 +37,30 @@ const client = new Client({
 
 client.on('qr', (qr) => {
     console.log('\n📱  Scan this QR code in WhatsApp → Linked Devices → Link a Device:\n');
-    qrcode.generate(qr, { small: true });
+    qrcode.generate(qr, { small: true }, function (qrcodeStr) {
+        console.log(qrcodeStr);
+        axios.post(`${PYTHON_WEBHOOK.replace('/webhook', '')}/api/qr`, { qr: qrcodeStr, status: 'qr' })
+             .catch(err => console.error('Failed to send QR to Flask:', err.message));
+    });
     console.log('\n(Session will be saved — you only need to scan once)\n');
 });
 
 client.on('authenticated', () => {
     console.log('✅  WhatsApp authenticated — session saved.');
+    axios.post(`${PYTHON_WEBHOOK.replace('/webhook', '')}/api/qr`, { qr: null, status: 'authenticated' })
+         .catch(err => {});
 });
 
 client.on('auth_failure', (msg) => {
     console.error('❌  Authentication failed:', msg);
+    axios.post(`${PYTHON_WEBHOOK.replace('/webhook', '')}/api/qr`, { qr: null, status: 'failure', error: msg })
+         .catch(err => {});
     process.exit(1);
 });
 
 client.on('ready', async () => {
+    axios.post(`${PYTHON_WEBHOOK.replace('/webhook', '')}/api/qr`, { qr: null, status: 'ready' })
+         .catch(err => {});
     console.log('\n====================================');
     console.log('  WhatsApp Listener — READY');
     console.log('====================================');

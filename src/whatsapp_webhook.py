@@ -821,6 +821,28 @@ def api_reject_order():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+# ── WhatsApp QR code state storage ───────────────────────────────────────────
+current_qr = None
+whatsapp_status = "initializing"
+whatsapp_error = None
+
+@app.route('/api/qr', methods=['POST', 'GET'])
+def api_qr():
+    global current_qr, whatsapp_status, whatsapp_error
+    if request.method == 'POST':
+        data = request.get_json(force=True, silent=True) or {}
+        current_qr = data.get('qr')
+        whatsapp_status = data.get('status', 'initializing')
+        whatsapp_error = data.get('error')
+        return jsonify({'ok': True})
+    else:
+        return jsonify({
+            'qr': current_qr,
+            'status': whatsapp_status,
+            'error': whatsapp_error
+        })
+
+
 @app.route('/api/status')
 def api_status():
     """Live health check for all four services."""

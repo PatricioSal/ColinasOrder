@@ -74,6 +74,8 @@ class App(ctk.CTk):
         self._tabs_ref        = None   # CTkTabview reference
         self._review_tab_name = "  Review  "
         self._all_products    = []     # cached list of {id, name}
+        self._qr_window       = None
+        self._qr_textbox      = None
 
         self._build_connect_screen()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -168,7 +170,7 @@ class App(ctk.CTk):
             self._node_proc = subprocess.Popen(
                 ["node", str(PROJECT_DIR / "whatsapp_listener.js")],
                 cwd=str(PROJECT_DIR),
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
             time.sleep(2)
 
@@ -219,6 +221,78 @@ class App(ctk.CTk):
         self._build_dashboard()
         threading.Thread(target=self._bg_refresh_loop, daemon=True).start()
         threading.Thread(target=self._bg_log_tail,     daemon=True).start()
+        self._start_qr_polling()
+
+    def _start_qr_polling(self):
+        self._poll_qr()
+
+    def _poll_qr(self):
+        if not self._connected:
+            return
+        
+        def _fetch():
+            try:
+                resp = requests.get(f"{FLASK_URL}/api/qr", timeout=3)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    self.after(0, lambda d=data: self._handle_qr_status(d))
+            except Exception:
+                pass
+            finally:
+                self.after(2000, self._poll_qr)
+                
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _handle_qr_status(self, data):
+        qr_text = data.get("qr")
+        status = data.get("status")
+        
+        if status == "qr" and qr_text:
+            if not self._qr_window or not self._qr_window.winfo_exists():
+                self._open_qr_window()
+            if self._qr_textbox:
+                self._qr_textbox.configure(state="normal")
+                # Strip leading/trailing newlines for clean display
+                clean_qr = qr_text.strip("\r\n")
+                self._qr_textbox.delete("1.0", "end")
+                self._qr_textbox.insert("1.0", clean_qr)
+                self._qr_textbox.configure(state="disabled")
+        else:
+            if self._qr_window and self._qr_window.winfo_exists():
+                self._qr_window.destroy()
+                self._qr_window = None
+                self._qr_textbox = None
+
+    def _open_qr_window(self):
+        self._qr_window = ctk.CTkToplevel(self)
+        self._qr_window.title("Scan WhatsApp QR Code")
+        self._qr_window.geometry("440x520")
+        self._qr_window.resizable(False, False)
+        
+        # Bring to front on open
+        self._qr_window.attributes("-topmost", True)
+        self._qr_window.after(500, lambda: self._qr_window.attributes("-topmost", False))
+        
+        lbl = ctk.CTkLabel(
+            self._qr_window, 
+            text="Scan this QR code with WhatsApp:\n(Linked Devices -> Link a Device)",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=TEXT
+        )
+        lbl.pack(pady=(15, 10))
+        
+        self._qr_textbox = ctk.CTkTextbox(
+            self._qr_window,
+            font=("Consolas", 8),
+            fg_color="#ffffff",
+            text_color="#000000",
+            corner_radius=8,
+            border_width=1,
+            border_color=BORDER,
+            wrap="none"
+        )
+        self._qr_textbox.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        self._qr_textbox.configure(state="disabled")
 
     def _build_dashboard(self):
         # Fetch products once

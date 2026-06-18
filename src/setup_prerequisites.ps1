@@ -182,7 +182,19 @@ if ($npmCmd) {
     Write-Host "[ ] Installing Node.js dependencies from package.json..." -ForegroundColor Yellow
     # Change folder to project root to run npm install
     Push-Location $PSScriptRoot
-    & $npmCmd install --no-audit --no-fund --loglevel=error
+    & $npmCmd install --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[!] npm install failed. Attempting clean install (removing package-lock.json)..." -ForegroundColor Yellow
+        $lockFile = Join-Path $PSScriptRoot "package-lock.json"
+        if (Test-Path $lockFile) {
+            Remove-Item -Path $lockFile -Force -ErrorAction SilentlyContinue
+        }
+        $nodeModules = Join-Path $PSScriptRoot "node_modules"
+        if (Test-Path $nodeModules) {
+            Remove-Item -Path $nodeModules -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        & $npmCmd install --no-audit --no-fund
+    }
     Pop-Location
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] Node.js dependencies installed successfully." -ForegroundColor Green
