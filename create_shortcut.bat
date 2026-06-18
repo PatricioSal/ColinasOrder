@@ -16,10 +16,11 @@ echo.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ws = New-Object -ComObject WScript.Shell; " ^
   "$s = $ws.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\WhatsApp Order Bot.lnk'); " ^
-  "$s.TargetPath = '%~dp0START.bat'; " ^
+  "$s.TargetPath = '%~dp0DASHBOARD.bat'; " ^
   "$s.WorkingDirectory = '%~dp0'; " ^
   "$s.WindowStyle = 1; " ^
-  "$s.Description = 'Start the WhatsApp Order Bot (Python + Node.js)'; " ^
+  "$s.IconLocation = 'shell32.dll, 277'; " ^
+  "$s.Description = 'Start the WhatsApp Order Bot Dashboard'; " ^
   "$s.Save()"
 
 if %errorlevel%==0 (
