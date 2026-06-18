@@ -8,11 +8,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# DB Config
-PG_USER = "openpg"
-PG_PWD = "openpgpwd"
-PG_HOST = "localhost"
-PG_PORT = 5432
+PG_USER = os.getenv("DB_USER", "openpg")
+PG_PWD = os.getenv("DB_PASSWORD", "openpgpwd")
+PG_HOST = os.getenv("DB_HOST", "localhost")
+PG_PORT = int(os.getenv("DB_PORT", "5432"))
 
 MSSQL_CONN_STR = os.getenv("MSSQL_CONN_STR", "")
 

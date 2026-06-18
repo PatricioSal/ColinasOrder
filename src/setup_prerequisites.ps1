@@ -181,8 +181,8 @@ try {
     $npmCmd = Get-NpmPath
     if ($npmCmd) {
         Write-Host "[ ] Installing Node.js dependencies from package.json..." -ForegroundColor Yellow
-        # Change folder to project root to run npm install
         Push-Location $PSScriptRoot
+        $env:PUPPETEER_SKIP_DOWNLOAD = "true"
         & $npmCmd install --no-audit --no-fund
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[!] npm install failed. Attempting clean install (removing package-lock.json)..." -ForegroundColor Yellow
@@ -196,6 +196,7 @@ try {
             }
             & $npmCmd install --no-audit --no-fund
         }
+        $env:PUPPETEER_SKIP_DOWNLOAD = $null
         Pop-Location
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[OK] Node.js dependencies installed successfully." -ForegroundColor Green

@@ -15,6 +15,8 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode  = require('qrcode-terminal');
 const axios   = require('axios');
 const express = require('express');
+const fs      = require('fs');
+const path    = require('path');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PYTHON_WEBHOOK = 'http://localhost:5050/webhook';  // Python Flask endpoint
@@ -26,14 +28,39 @@ const GROUP_ONLY     = true;   // Set false to also process 1:1 messages
 // NOTE: This is now mutable — updated live via POST /config from the dashboard.
 let currentGroupFilter = ['Testing'];
 
+// Helper to find Google Chrome executable on Windows
+function getChromePath() {
+    const paths = [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        path.join(process.env.LOCALAPPDATA || '', 'Google\\Chrome\\Application\\chrome.exe')
+    ];
+    for (const p of paths) {
+        if (fs.existsSync(p)) {
+            return p;
+        }
+    }
+    return null;
+}
+
 // ── WhatsApp Client ───────────────────────────────────────────────────────────
-const client = new Client({
+const chromePath = getChromePath();
+const clientOpts = {
     authStrategy: new LocalAuth({ dataPath: './whatsapp_session' }),
     puppeteer: {
         headless: true,                 // No browser window needed
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
     }
-});
+};
+
+if (chromePath) {
+    clientOpts.puppeteer.executablePath = chromePath;
+    console.log(`🤖 Puppeteer: Using local Google Chrome installation at: ${chromePath}`);
+} else {
+    console.log(`⚠️  Puppeteer: Local Google Chrome not found, relying on default browser download.`);
+}
+
+const client = new Client(clientOpts);
 
 client.on('qr', (qr) => {
     console.log('\n📱  Scan this QR code in WhatsApp → Linked Devices → Link a Device:\n');
