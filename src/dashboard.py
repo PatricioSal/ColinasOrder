@@ -157,7 +157,7 @@ class App(ctk.CTk):
             # 1. Start Python Flask webhook
             self._set_conn_status("Starting Python webhook…")
             self._flask_proc = subprocess.Popen(
-                [sys.executable, str(PROJECT_DIR / "src" / "whatsapp_webhook.py")],
+                [sys.executable, str(PROJECT_DIR / "whatsapp_webhook.py")],
                 cwd=str(ROOT_DIR),
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
@@ -167,7 +167,7 @@ class App(ctk.CTk):
             self._set_conn_status("Starting WhatsApp listener…")
             self._node_proc = subprocess.Popen(
                 ["node", str(PROJECT_DIR / "whatsapp_listener.js")],
-                cwd=str(PROJECT_DIR),
+                cwd=str(ROOT_DIR),
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
             time.sleep(2)
