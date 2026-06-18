@@ -168,7 +168,7 @@ class App(ctk.CTk):
             self._node_proc = subprocess.Popen(
                 ["node", str(PROJECT_DIR / "whatsapp_listener.js")],
                 cwd=str(ROOT_DIR),
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
             time.sleep(2)
 

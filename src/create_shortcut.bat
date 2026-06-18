@@ -14,9 +14,9 @@ echo.
 echo  ============================================================
 echo   Checking for repository updates from GitHub...
 echo  ============================================================
-git pull 2>nul
+git pull origin main 2>nul
 if %errorlevel% neq 0 (
-    echo   [Info] Git not detected or offline. Skipping update check.
+    echo   [Info] Git not detected, offline, or repository branch tracking mismatch. Skipping update check.
 )
 echo  ============================================================
 echo.

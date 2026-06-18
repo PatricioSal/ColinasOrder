@@ -133,6 +133,7 @@ def webhook():
         return jsonify({"ok": False, "reply": error_reply})
 
 def _get_mssql_customer_price(mssql_customer_id, mssql_material_id, fallback_price):
+    ms = None
     try:
         import pyodbc
         ms = pyodbc.connect(MSSQL_CONN_STR, timeout=3)
@@ -142,7 +143,6 @@ def _get_mssql_customer_price(mssql_customer_id, mssql_material_id, fallback_pri
         cur.execute("SELECT PriceListID, PreiceListID_TierNo FROM Tbl_Sales_Customers WHERE CustomerID = ?", (mssql_customer_id,))
         cust_row = cur.fetchone()
         if not cust_row or not cust_row.PriceListID:
-            ms.close()
             return fallback_price
             
         price_list_id = cust_row.PriceListID
@@ -151,7 +151,6 @@ def _get_mssql_customer_price(mssql_customer_id, mssql_material_id, fallback_pri
         # 2. Get the corresponding Price column based on TierNo
         cur.execute("SELECT Price, Price1, Price2 FROM Tbl_Sales_PriceLists_Materials WHERE PriceListID = ? AND MaterialID = ?", (price_list_id, mssql_material_id))
         pl_row = cur.fetchone()
-        ms.close()
         
         if not pl_row:
             return fallback_price
@@ -167,6 +166,12 @@ def _get_mssql_customer_price(mssql_customer_id, mssql_material_id, fallback_pri
     except Exception as e:
         log.error(f"  [MSSQL Price Lookup Error] {e}")
         return fallback_price
+    finally:
+        if ms:
+            try:
+                ms.close()
+            except Exception:
+                pass
 
 
 # ── Order Processing ──────────────────────────────────────────────────────────
@@ -346,6 +351,7 @@ def next_business_day():
 
 def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flags, overrides=None):
     """Push draft order to remote SQL Server. Returns reply string."""
+    ms = None
     try:
         import pyodbc
         ms = pyodbc.connect(MSSQL_CONN_STR, timeout=5)
@@ -479,7 +485,6 @@ def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flag
 
         ms.commit()
         cur.close()
-        ms.close()
         log.info(f"  [MSSQL] Draft created: SalesOrderID={sales_order_id}, No={new_order_no}, ShipDate={ship_date}")
 
         reply = f"📋 Draft Sales Order #{new_order_no} created! (ID: {sales_order_id}) Ship: {ship_date.strftime('%a %b %d')}"
@@ -490,6 +495,12 @@ def _push_to_mssql(conn, customer, order_lines, grand_total, special_instr, flag
     except Exception as e:
         log.error(f"  [MSSQL ERROR] {e}")
         return "Order received but failed to save to remote database. Please contact sales team."
+    finally:
+        if ms:
+            try:
+                ms.close()
+            except Exception:
+                pass
 
 
 
@@ -522,16 +533,22 @@ def health():
 @app.route('/api/login', methods=['POST'])
 def api_login():
     """Test MSSQL connection — called by dashboard Connect button."""
+    c = None
     try:
         import pyodbc
         c = pyodbc.connect(MSSQL_CONN_STR, timeout=5)
-        c.close()
         session['connected'] = True
         log.info('[DASHBOARD] Login successful — MSSQL connection verified.')
         return jsonify({'ok': True})
     except Exception as e:
         log.warning(f'[DASHBOARD] Login failed: {e}')
         return jsonify({'ok': False, 'error': str(e)})
+    finally:
+        if c:
+            try:
+                c.close()
+            except Exception:
+                pass
 
 
 @app.route('/api/orders/pending')
@@ -588,6 +605,7 @@ def api_orders_pending():
             d['customer_details'] = None
             cust_id = d.get('customer_id')
             if cust_id:
+                ms = None
                 try:
                     import pyodbc
                     ms  = pyodbc.connect(MSSQL_CONN_STR, timeout=4)
@@ -603,7 +621,6 @@ def api_orders_pending():
                         WHERE CustomerID = ?
                     """, (cust_id,))
                     crow = cur2.fetchone()
-                    ms.close()
                     if crow:
                         d['customer_details'] = {
                             'name':          crow[0],
@@ -622,6 +639,12 @@ def api_orders_pending():
                         }
                 except Exception as ex:
                     log.warning(f'[API /orders/pending] MSSQL lookup failed: {ex}')
+                finally:
+                    if ms:
+                        try:
+                            ms.close()
+                        except Exception:
+                            pass
             result.append(d)
         return jsonify(result)
     except Exception as e:
@@ -809,9 +832,16 @@ def api_status():
         pass
     try:
         import pyodbc
-        c = pyodbc.connect(MSSQL_CONN_STR, timeout=3)
-        c.close()
-        result['mssql'] = True
+        c = None
+        try:
+            c = pyodbc.connect(MSSQL_CONN_STR, timeout=3)
+            result['mssql'] = True
+        finally:
+            if c:
+                try:
+                    c.close()
+                except Exception:
+                    pass
     except Exception:
         pass
     try:
