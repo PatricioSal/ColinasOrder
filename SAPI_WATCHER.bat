@@ -56,7 +56,12 @@ if %errorlevel% neq 0 (
 echo ============================================================
 echo  Launching SAPI_WATCHER...
 echo ============================================================
-start "" %PYTHON_CMD% src\dashboard.py
+%PYTHON_CMD% src\dashboard.py
+if %errorlevel% neq 0 (
+    echo.
+    echo [Error] SAPI_WATCHER crashed or failed to start (exit code: %errorlevel%).
+    pause
+)
 exit /b
 
 :run_setup
