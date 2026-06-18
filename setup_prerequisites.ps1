@@ -106,6 +106,23 @@ if ($nodeExe) {
     }
 }
 
+# --- Check/Install Git ---
+Refresh-Path
+$gitCheck = Get-Command git -ErrorAction SilentlyContinue
+if ($gitCheck) {
+    Write-Host "[OK] Git is already installed." -ForegroundColor Green
+} else {
+    Write-Host "[ ] Git not detected. Installing via winget..." -ForegroundColor Yellow
+    winget install --id Git.Git -e --silent --accept-package-agreements --accept-source-agreements
+    Refresh-Path
+    $gitCheck = Get-Command git -ErrorAction SilentlyContinue
+    if ($gitCheck) {
+        Write-Host "[OK] Git installed successfully!" -ForegroundColor Green
+    } else {
+        Write-Host "[!] Git installation could not be completed automatically. Please download it from https://git-scm.com/." -ForegroundColor Red
+    }
+}
+
 # --- 4. Check/Install ODBC Driver 18 for SQL Server ---
 Write-Host "[ ] Ensuring ODBC Driver 18 for SQL Server is installed..." -ForegroundColor Yellow
 winget install --id Microsoft.ODBCDriverForSQLServer -e --silent --accept-package-agreements --accept-source-agreements
