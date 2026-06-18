@@ -40,7 +40,9 @@ if %errorlevel% neq 0 (
     echo [Warning] Python library installation returned an error.
 )
 
-call npm install --prefix src --quiet
+pushd src
+call npm install --no-audit --no-fund --loglevel=error
+popd
 if %errorlevel% neq 0 (
     echo [Warning] Node.js package installation returned an error.
 )

@@ -194,7 +194,7 @@ if ($npmCmd) {
     Write-Host "[ ] Installing Node.js dependencies from package.json..." -ForegroundColor Yellow
     # Change folder to project root to run npm install
     Push-Location $PSScriptRoot
-    & $npmCmd install
+    & $npmCmd install --no-audit --no-fund --loglevel=error
     Pop-Location
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] Node.js dependencies installed successfully." -ForegroundColor Green
