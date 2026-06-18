@@ -147,27 +147,15 @@ if ($pgService) {
 # --- 6. Set up `.env` File ---
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $envPath = Join-Path $repoRoot ".env"
+$examplePath = Join-Path $PSScriptRoot ".env.example"
 if (-not (Test-Path $envPath)) {
-    Write-Host "[ ] Creating default .env file..." -ForegroundColor Yellow
-    $defaultEnv = @"
-# Database Credentials for Sales Agent
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=whatsapp_orders
-DB_USER=openpg
-DB_PASSWORD=openpgpwd
-
-# Toggle to push drafts directly to live SQL Server (True/False)
-PUSH_TO_MSSQL=True
-
-# WhatsApp Business API Configuration
-WHATSAPP_API_KEY=mock_api_key_for_testing_12345
-WHATSAPP_PHONE_NUMBER_ID=1234567890
-
-MSSQL_CONN_STR="DRIVER={ODBC Driver 18 for SQL Server};SERVER=your_sql_server_ip,port;DATABASE=ColinasProducts;UID=your_sql_username;PWD=your_sql_password;Encrypt=yes;TrustServerCertificate=yes;"
-"@
-    Set-Content -Path $envPath -Value $defaultEnv
-    Write-Host "[OK] .env file created." -ForegroundColor Green
+    if (Test-Path $examplePath) {
+        Write-Host "[ ] Creating default .env file from template..." -ForegroundColor Yellow
+        Copy-Item -Path $examplePath -Destination $envPath
+        Write-Host "[OK] .env file created." -ForegroundColor Green
+    } else {
+        Write-Host "[!] .env.example template not found. Cannot create default .env." -ForegroundColor Red
+    }
 } else {
     Write-Host "[OK] .env file already exists." -ForegroundColor Green
 }
