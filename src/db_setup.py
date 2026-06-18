@@ -110,6 +110,9 @@ def create_tables(conn):
     END $$;
     """);
     
+    # Ensure quantity column exists after any renames have run
+    cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity NUMERIC;")
+    
     conn.commit()
     cur.close()
 
