@@ -223,3 +223,5 @@ Write-Host " Setup complete! Double-click 'SAPI_WATCHER' on your" -ForegroundCol
 Write-Host " Desktop to start the application." -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host ""
+Read-Host "Press Enter to close this window..."
+

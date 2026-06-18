@@ -58,7 +58,7 @@ echo ============================================================
 echo  Missing dependencies or .env config detected!
 echo  Running setup assistant with Administrator privileges...
 echo ============================================================
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"%~dp0src\setup_prerequisites.ps1\"' -Verb RunAs"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File src\setup_prerequisites.ps1' -WorkingDirectory (Get-Location).Path -Verb RunAs"
 echo.
 echo  Please complete the setup in the elevated window.
 echo  Once setup is complete, you can launch SAPI_WATCHER.
