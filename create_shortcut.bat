@@ -19,24 +19,24 @@ if %errorlevel% neq 0 (
 echo  ============================================================
 echo.
 
-echo  Creating Desktop shortcut for WhatsApp Order Bot...
+echo  Creating Desktop shortcut for SAPI_WATCHER...
 echo.
 
 :: Use PowerShell to create a proper .lnk shortcut
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ws = New-Object -ComObject WScript.Shell; " ^
-  "$s = $ws.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\WhatsApp Order Bot.lnk'); " ^
+  "$s = $ws.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\SAPI_WATCHER.lnk'); " ^
   "$s.TargetPath = '%~dp0DASHBOARD.bat'; " ^
   "$s.WorkingDirectory = '%~dp0'; " ^
   "$s.WindowStyle = 1; " ^
   "$s.IconLocation = 'shell32.dll, 277'; " ^
-  "$s.Description = 'Start the WhatsApp Order Bot Dashboard'; " ^
+  "$s.Description = 'Start the SAPI_WATCHER Dashboard'; " ^
   "$s.Save()"
 
 if %errorlevel%==0 (
     echo  ============================================================
     echo   SUCCESS! Shortcut created on your Desktop:
-    echo     "WhatsApp Order Bot"
+    echo     "SAPI_WATCHER"
     echo.
     echo   Double-click it anytime to start the bot.
     echo  ============================================================
