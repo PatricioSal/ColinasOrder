@@ -167,7 +167,7 @@ class App(ctk.CTk):
             self._set_conn_status("Starting WhatsApp listener…")
             self._node_proc = subprocess.Popen(
                 ["node", str(PROJECT_DIR / "whatsapp_listener.js")],
-                cwd=str(ROOT_DIR),
+                cwd=str(PROJECT_DIR),
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
             time.sleep(2)
@@ -414,7 +414,19 @@ class App(ctk.CTk):
 
     def _load_review_worker(self):
         try:
-            orders = requests.get(f"{FLASK_URL}/api/orders/pending", timeout=6).json()
+            res = requests.get(f"{FLASK_URL}/api/orders/pending", timeout=6)
+            if res.status_code != 200:
+                try:
+                    err = res.json()
+                    err_msg = err.get("error") if isinstance(err, dict) else None
+                    if not err_msg:
+                        err_msg = f"Server error: {res.status_code}"
+                except Exception:
+                    err_msg = f"Server error: {res.status_code}"
+                raise RuntimeError(err_msg)
+            orders = res.json()
+            if not isinstance(orders, list):
+                raise RuntimeError("Expected a list of orders from the server.")
             self.after(0, lambda o=orders: self._render_review(o))
         except Exception as e:
             self.after(0, lambda msg=str(e): self._render_review_error(msg))
