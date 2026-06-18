@@ -112,6 +112,19 @@ class App(ctk.CTk):
         )
         self._conn_btn.pack(pady=(0, 10))
 
+        self._settings_btn = ctk.CTkButton(
+            self._conn_frame,
+            text="⚙  Connection Settings",
+            font=ctk.CTkFont(size=12),
+            width=270, height=36,
+            fg_color=CARD, hover_color=SURFACE,
+            border_width=1, border_color=BORDER,
+            text_color=TEXT,
+            corner_radius=8,
+            command=self._open_settings_dialog,
+        )
+        self._settings_btn.pack(pady=(0, 10))
+
         self._error_lbl = ctk.CTkLabel(self._conn_frame, text="",
                                         font=ctk.CTkFont(size=12),
                                         text_color=ERROR,
@@ -255,12 +268,14 @@ class App(ctk.CTk):
         tabs.add("  Direct Entry  ")
         tabs.add("  Groups  ")
         tabs.add("  Live Logs  ")
+        tabs.add("  Settings  ")
 
         self._build_tab_dashboard(tabs.tab("  Dashboard  "))
         self._build_tab_review(tabs.tab(self._review_tab_name))
         self._build_tab_direct_entry(tabs.tab("  Direct Entry  "))
         self._build_tab_groups(tabs.tab("  Groups  "))
         self._build_tab_logs(tabs.tab("  Live Logs  "))
+        self._build_tab_settings(tabs.tab("  Settings  "))
 
     # ── Dashboard tab ──────────────────────────────────────────────────────────
     def _build_tab_dashboard(self, parent):
@@ -1216,6 +1231,187 @@ class App(ctk.CTk):
     @staticmethod
     def _trunc(s: str, n: int) -> str:
         return s if len(s) <= n else s[:n] + "…"
+
+    # ── Settings Configuration ────────────────────────────────────────────────
+    def _load_env_dict(self):
+        env_path = PROJECT_DIR / ".env"
+        if not env_path.exists():
+            example_path = PROJECT_DIR / ".env.example"
+            if example_path.exists():
+                try:
+                    import shutil
+                    shutil.copy(example_path, env_path)
+                except Exception:
+                    pass
+        
+        env_vars = {
+            "DB_HOST": "localhost",
+            "DB_PORT": "5432",
+            "DB_NAME": "whatsapp_orders",
+            "DB_USER": "openpg",
+            "DB_PASSWORD": "openpgpwd",
+            "PUSH_TO_MSSQL": "True",
+            "MSSQL_CONN_STR": "",
+            "WHATSAPP_API_KEY": "mock_api_key_for_testing_12345",
+            "WHATSAPP_PHONE_NUMBER_ID": "1234567890",
+        }
+        
+        if env_path.exists():
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip()
+                            if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                                v = v[1:-1]
+                            env_vars[k] = v
+            except Exception as e:
+                print(f"Error loading .env: {e}")
+        return env_vars
+
+    def _save_env_dict(self, env_vars):
+        env_path = PROJECT_DIR / ".env"
+        lines = []
+        if env_path.exists():
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            except Exception:
+                pass
+                
+        updated_keys = set()
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                k, v = stripped.split("=", 1)
+                k = k.strip()
+                if k in env_vars:
+                    val_to_write = env_vars[k]
+                    if any(char in val_to_write for char in (' ', '=', '{', ';', '"', "'")):
+                        new_lines.append(f'{k}="{val_to_write}"\n')
+                    else:
+                        new_lines.append(f'{k}={val_to_write}\n')
+                    updated_keys.add(k)
+                    continue
+            new_lines.append(line)
+            
+        for k, v in env_vars.items():
+            if k not in updated_keys:
+                val_to_write = v
+                if any(char in val_to_write for char in (' ', '=', '{', ';', '"', "'")):
+                    new_lines.append(f'{k}="{val_to_write}"\n')
+                else:
+                    new_lines.append(f'{k}={val_to_write}\n')
+                    
+        try:
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+            return True
+        except Exception as e:
+            print(f"Error saving .env: {e}")
+            return False
+
+    def _open_settings_dialog(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Connection & Environment Settings")
+        dialog.geometry("620x680")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text="Environment Configuration",
+                     font=ctk.CTkFont(size=16, weight="bold"), text_color=TEXT).pack(pady=(15, 0))
+
+        self._build_settings_form(dialog, is_dialog=True, dialog_win=dialog)
+
+    def _build_tab_settings(self, parent):
+        parent.configure(fg_color=BG)
+        self._build_settings_form(parent, is_dialog=False)
+
+    def _build_settings_form(self, container, is_dialog=False, dialog_win=None):
+        env_vars = self._load_env_dict()
+
+        scroll = ctk.CTkScrollableFrame(container, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=10, pady=10)
+        scroll.columnconfigure(0, weight=1)
+
+        def add_section(text):
+            f = ctk.CTkFrame(scroll, fg_color="transparent")
+            f.pack(fill="x", pady=(15, 5))
+            ctk.CTkLabel(f, text=text, font=ctk.CTkFont(size=13, weight="bold"), text_color=BLUE).pack(anchor="w")
+            ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(fill="x", pady=4)
+
+        entries = {}
+        def add_input(label_text, key, is_checkbox=False):
+            f = ctk.CTkFrame(scroll, fg_color="transparent")
+            f.pack(fill="x", pady=4)
+            ctk.CTkLabel(f, text=label_text, width=200, anchor="w", text_color=TEXT2).pack(side="left")
+            
+            if is_checkbox:
+                var = ctk.BooleanVar(value=env_vars.get(key, "True").lower() == "true")
+                cb = ctk.CTkCheckBox(f, text="", variable=var, fg_color=GREEN, hover_color=GREEN_D, checkmark_color="#000000", border_color=BORDER)
+                cb.pack(side="left")
+                entries[key] = var
+            else:
+                entry = ctk.CTkEntry(f, fg_color=CARD, text_color=TEXT, border_color=BORDER)
+                entry.insert(0, env_vars.get(key, ""))
+                entry.pack(side="left", fill="x", expand=True)
+                entries[key] = entry
+
+        add_section("Local PostgreSQL Database")
+        add_input("Host Address", "DB_HOST")
+        add_input("Port Number", "DB_PORT")
+        add_input("Database Name", "DB_NAME")
+        add_input("Username", "DB_USER")
+        add_input("Password", "DB_PASSWORD")
+
+        add_section("Remote SQL Server Integration")
+        add_input("Push Drafts directly to SQL", "PUSH_TO_MSSQL", is_checkbox=True)
+        add_input("SQL Server Connection String", "MSSQL_CONN_STR")
+
+        add_section("WhatsApp Meta API Configuration (Optional)")
+        add_input("API Key", "WHATSAPP_API_KEY")
+        add_input("Phone Number ID", "WHATSAPP_PHONE_NUMBER_ID")
+
+        status_lbl = ctk.CTkLabel(scroll, text="", font=ctk.CTkFont(size=12))
+        status_lbl.pack(pady=10)
+
+        def save():
+            payload = {}
+            for k, val_w in entries.items():
+                if isinstance(val_w, ctk.BooleanVar):
+                    payload[k] = str(val_w.get())
+                else:
+                    payload[k] = val_w.get().strip()
+            
+            if not payload["DB_HOST"] or not payload["DB_PORT"] or not payload["DB_NAME"] or not payload["DB_USER"]:
+                status_lbl.configure(text="Please fill in all database fields.", text_color=ERROR)
+                return
+                
+            success = self._save_env_dict(payload)
+            if success:
+                status_lbl.configure(text="OK Settings saved to .env file! Restart services to apply.", text_color=GREEN)
+                if is_dialog and dialog_win:
+                    self.after(1200, dialog_win.destroy)
+            else:
+                status_lbl.configure(text="Failed to save settings. Check write permissions.", text_color=ERROR)
+
+        btn_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        btn_frame.pack(fill="x", pady=10)
+        
+        save_btn = ctk.CTkButton(
+            btn_frame, 
+            text="Save Settings", 
+            font=ctk.CTkFont(weight="bold"),
+            fg_color=GREEN, hover_color=GREEN_D, text_color=BG,
+            command=save
+        )
+        save_btn.pack(side="right")
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
     def _on_close(self):
