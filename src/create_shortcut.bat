@@ -6,7 +6,9 @@
 :: ============================================================
 
 title Creating Desktop Shortcut...
-cd /d "%~dp0"
+:: Resolve the parent root directory (one level up from src/)
+for %%i in ("%~dp0..") do set "ROOT_DIR=%%~fi"
+cd /d "%ROOT_DIR%"
 
 echo.
 echo  ============================================================
@@ -22,12 +24,12 @@ echo.
 echo  Creating Desktop shortcut for SAPI_WATCHER...
 echo.
 
-:: Use PowerShell to create a proper .lnk shortcut
+:: Use PowerShell to create a proper .lnk shortcut pointing to SAPI_WATCHER.bat in the root
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ws = New-Object -ComObject WScript.Shell; " ^
   "$s = $ws.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\SAPI_WATCHER.lnk'); " ^
-  "$s.TargetPath = '%~dp0DASHBOARD.bat'; " ^
-  "$s.WorkingDirectory = '%~dp0'; " ^
+  "$s.TargetPath = '%ROOT_DIR%\SAPI_WATCHER.bat'; " ^
+  "$s.WorkingDirectory = '%ROOT_DIR%'; " ^
   "$s.WindowStyle = 1; " ^
   "$s.IconLocation = 'shell32.dll, 277'; " ^
   "$s.Description = 'Start the SAPI_WATCHER Dashboard'; " ^

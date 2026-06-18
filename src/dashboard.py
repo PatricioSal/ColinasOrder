@@ -1237,7 +1237,7 @@ class App(ctk.CTk):
     def _load_env_dict(self):
         env_path = ROOT_DIR / ".env"
         if not env_path.exists():
-            example_path = ROOT_DIR / ".env.example"
+            example_path = PROJECT_DIR / ".env.example"
             if example_path.exists():
                 try:
                     import shutil

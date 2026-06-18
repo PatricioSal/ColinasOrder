@@ -145,7 +145,8 @@ if ($pgService) {
 }
 
 # --- 6. Set up `.env` File ---
-$envPath = Join-Path $PSScriptRoot ".env"
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$envPath = Join-Path $repoRoot ".env"
 if (-not (Test-Path $envPath)) {
     Write-Host "[ ] Creating default .env file..." -ForegroundColor Yellow
     $defaultEnv = @"
@@ -211,7 +212,7 @@ if ($pyExe) {
     Write-Host "[ ] Initializing database tables and syncing data..." -ForegroundColor Yellow
     Write-Host "    (Make sure PostgreSQL is running. If this is a fresh PostgreSQL install, you may need" -ForegroundColor Yellow
     Write-Host "     to create the database 'whatsapp_orders' or ensure the superuser credentials match your .env)" -ForegroundColor Yellow
-    & $pyExe (Join-Path $PSScriptRoot "src\db_setup.py")
+    & $pyExe (Join-Path $PSScriptRoot "db_setup.py")
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] Database setup and sync completed successfully." -ForegroundColor Green
     } else {
@@ -230,7 +231,7 @@ if (Test-Path (Join-Path $PSScriptRoot "create_shortcut.bat")) {
 
 Write-Host ""
 Write-Host "==========================================================" -ForegroundColor Green
-Write-Host " Setup complete! Double-click 'WhatsApp Order Bot' on your" -ForegroundColor Green
+Write-Host " Setup complete! Double-click 'SAPI_WATCHER' on your" -ForegroundColor Green
 Write-Host " Desktop to start the application." -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host ""
