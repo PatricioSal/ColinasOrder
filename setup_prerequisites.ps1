@@ -194,12 +194,12 @@ if ($pyExe) {
     Write-Host "[ ] Initializing database tables and syncing data..." -ForegroundColor Yellow
     Write-Host "    (Make sure PostgreSQL is running. If this is a fresh PostgreSQL install, you may need" -ForegroundColor Yellow
     Write-Host "     to create the database 'whatsapp_orders' or ensure the superuser credentials match your .env)" -ForegroundColor Yellow
-    & $pyExe (Join-Path $PSScriptRoot "db_setup.py")
+    & $pyExe (Join-Path $PSScriptRoot "src\db_setup.py")
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] Database setup and sync completed successfully." -ForegroundColor Green
     } else {
         Write-Host "[!] Database initialization failed. If PostgreSQL was just installed, please restart your computer" -ForegroundColor Red
-        Write-Host "    and run: py db_setup.py manually." -ForegroundColor Red
+        Write-Host "    and run: py src\db_setup.py manually." -ForegroundColor Red
     }
 }
 

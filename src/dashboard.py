@@ -29,9 +29,10 @@ ctk.set_default_color_theme("green")
 
 # ── Paths & URLs ───────────────────────────────────────────────────────────────
 PROJECT_DIR = Path(__file__).parent
+ROOT_DIR    = PROJECT_DIR.parent
 FLASK_URL   = "http://localhost:5050"
 NODE_URL    = "http://localhost:3000"
-LOG_FILE    = PROJECT_DIR / "webhook.log"
+LOG_FILE    = ROOT_DIR / "webhook.log"
 
 # ── Palette ────────────────────────────────────────────────────────────────────
 BG      = "#0d1117"
@@ -156,8 +157,8 @@ class App(ctk.CTk):
             # 1. Start Python Flask webhook
             self._set_conn_status("Starting Python webhook…")
             self._flask_proc = subprocess.Popen(
-                [sys.executable, str(PROJECT_DIR / "whatsapp_webhook.py")],
-                cwd=str(PROJECT_DIR),
+                [sys.executable, str(PROJECT_DIR / "src" / "whatsapp_webhook.py")],
+                cwd=str(ROOT_DIR),
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
             time.sleep(2.5)
@@ -1234,9 +1235,9 @@ class App(ctk.CTk):
 
     # ── Settings Configuration ────────────────────────────────────────────────
     def _load_env_dict(self):
-        env_path = PROJECT_DIR / ".env"
+        env_path = ROOT_DIR / ".env"
         if not env_path.exists():
-            example_path = PROJECT_DIR / ".env.example"
+            example_path = ROOT_DIR / ".env.example"
             if example_path.exists():
                 try:
                     import shutil
@@ -1275,7 +1276,7 @@ class App(ctk.CTk):
         return env_vars
 
     def _save_env_dict(self, env_vars):
-        env_path = PROJECT_DIR / ".env"
+        env_path = ROOT_DIR / ".env"
         lines = []
         if env_path.exists():
             try:

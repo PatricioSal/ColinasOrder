@@ -7,4 +7,4 @@
 
 title WhatsApp Order Bot
 cd /d "%~dp0"
-py dashboard.py
+py src\dashboard.py
