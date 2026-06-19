@@ -1088,7 +1088,7 @@ class App(ctk.CTk):
 
     def _load_groups_worker(self):
         try:
-            resp = requests.get(f"{NODE_URL}/groups", timeout=6)
+            resp = requests.get(f"{NODE_URL}/groups", timeout=30)
             data = resp.json()
             if not data.get("ok"):
                 self.after(0, lambda d=data: self._group_msg.configure(

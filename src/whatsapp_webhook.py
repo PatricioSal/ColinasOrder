@@ -877,7 +877,7 @@ def api_status():
     """Live health check for all four services."""
     result = {'flask': True, 'node': False, 'mssql': False, 'postgres': False, 'auto_replies_paused': AUTO_REPLIES_PAUSED}
     try:
-        r = requests.get('http://localhost:3000/status', timeout=2)
+        r = requests.get('http://localhost:3000/status', timeout=5)
         result['node'] = r.status_code == 200
     except Exception:
         pass

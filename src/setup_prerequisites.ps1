@@ -141,7 +141,7 @@ try {
         Write-Host "    - When prompted for a password, enter 'openpgpwd' (or note what you enter and update" -ForegroundColor Cyan
         Write-Host "      your .env file with the password later)." -ForegroundColor Cyan
         Write-Host "    ----------------------------------------------------------------------------------" -ForegroundColor Cyan
-        winget install --id PostgreSQL.PostgreSQL -e --accept-package-agreements --accept-source-agreements
+        winget install --id PostgreSQL.PostgreSQL -e --interactive --accept-package-agreements --accept-source-agreements
         Write-Host "[OK] PostgreSQL setup initiated/finished." -ForegroundColor Green
     }
 
