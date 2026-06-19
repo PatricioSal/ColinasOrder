@@ -699,6 +699,7 @@ class App(ctk.CTk):
         lines_scroll.pack(fill="both", expand=True)
 
         qty_entries = {}
+        sec_qty_entries = {}
         prod_vars = {}
         note_entries = {}
         deleted_line_ids = []
@@ -713,22 +714,48 @@ class App(ctk.CTk):
             prod_name_var = ctk.StringVar(value=line.get("product", "Unknown"))
             prod_id_var = ctk.StringVar(value=str(line.get("product_id", "")))
 
-            entry = ctk.CTkEntry(top_part, textvariable=prod_name_var, width=280)
+            entry = ctk.CTkEntry(top_part, textvariable=prod_name_var, width=220)
             entry.pack(side="left", padx=10, pady=10)
 
+            # Keep track of active product's qty_per_case and UOM for live weight calculations
+            line_prod_id = line.get("product_id")
+            initial_p = next((p for p in self._all_products if p['id'] == line_prod_id), None)
+            line_state = {
+                'qty_per_case': float(initial_p.get('qty_per_case', 1.0)) if initial_p else 1.0,
+                'uom': initial_p.get('uom', 'EA') if initial_p else 'EA'
+            }
+
             ctk.CTkLabel(top_part, text="Cases:", font=ctk.CTkFont(size=12), text_color=TEXT2).pack(side="left", padx=5)
-            qty_entry = ctk.CTkEntry(top_part, width=60, justify="center")
+            qty_entry = ctk.CTkEntry(top_part, width=50, justify="center")
             qty_entry.insert(0, str(line.get("qty", 0)))
             qty_entry.pack(side="left")
 
-            ctk.CTkLabel(top_part, text="Note:", font=ctk.CTkFont(size=12), text_color=TEXT2).pack(side="left", padx=(10, 5))
-            note_entry = ctk.CTkEntry(top_part, width=150)
+            ctk.CTkLabel(top_part, text="Lbs:", font=ctk.CTkFont(size=12), text_color=TEXT2).pack(side="left", padx=(8, 4))
+            sec_qty_entry = ctk.CTkEntry(top_part, width=60, justify="center")
+            sec_qty_entry.insert(0, str(line.get("secondary_qty", 0.0)))
+            sec_qty_entry.pack(side="left")
+
+            ctk.CTkLabel(top_part, text="Note:", font=ctk.CTkFont(size=12), text_color=TEXT2).pack(side="left", padx=(8, 4))
+            note_entry = ctk.CTkEntry(top_part, width=110)
             note_entry.insert(0, line.get("line_note") or "")
             note_entry.pack(side="left")
+
+            def on_qty_change(*args, qe=qty_entry, sqe=sec_qty_entry, state=line_state):
+                try:
+                    c_val = float(qe.get())
+                    if 'LB' in state['uom'].upper() or 'POUND' in state['uom'].upper() or state['qty_per_case'] > 1.0:
+                        calculated_lbs = c_val * state['qty_per_case']
+                        sqe.delete(0, "end")
+                        sqe.insert(0, f"{calculated_lbs:.2f}")
+                except ValueError:
+                    pass
+
+            qty_entry.bind("<KeyRelease>", on_qty_change)
 
             def remove_line(r=row, lid=line["id"]):
                 r.destroy()
                 if lid in qty_entries: del qty_entries[lid]
+                if lid in sec_qty_entries: del sec_qty_entries[lid]
                 if lid in prod_vars: del prod_vars[lid]
                 if lid in note_entries: del note_entries[lid]
                 deleted_line_ids.append(lid)
@@ -737,6 +764,7 @@ class App(ctk.CTk):
                           text_color=ERROR, command=remove_line).pack(side="left", padx=(10, 0))
 
             qty_entries[line["id"]] = qty_entry
+            sec_qty_entries[line["id"]] = sec_qty_entry
             prod_vars[line["id"]]   = prod_id_var
             note_entries[line["id"]] = note_entry
 
@@ -759,9 +787,18 @@ class App(ctk.CTk):
                 
                 rf.pack(fill="x", padx=10, pady=(0, 10))
                 for p in matches:
-                    def select(p=p):
+                    def select(p=p, state=line_state, qe=qty_entry, sqe=sec_qty_entry):
                         var.set(p['name'])
                         idv.set(str(p['id']))
+                        state['qty_per_case'] = float(p.get('qty_per_case', 1.0))
+                        state['uom'] = p.get('uom', 'EA')
+                        try:
+                            c_val = float(qe.get())
+                            calculated_lbs = c_val * state['qty_per_case']
+                            sqe.delete(0, "end")
+                            sqe.insert(0, f"{calculated_lbs:.2f}")
+                        except ValueError:
+                            pass
                         rf.pack_forget()
                     
                     price = float(p.get('price') or 0.0)
@@ -815,6 +852,7 @@ class App(ctk.CTk):
             for line_id, entry_widget in qty_entries.items():
                 try:
                     qty = float(entry_widget.get())
+                    sec_qty = float(sec_qty_entries[line_id].get()) if line_id in sec_qty_entries else 0.0
                     prod_id_str = prod_vars[line_id]["id"].get()
                     prod_id = int(prod_id_str) if prod_id_str.isdigit() else None
                     
@@ -823,6 +861,7 @@ class App(ctk.CTk):
                     lines_data.append({
                         "id": line_id, 
                         "qty": qty, 
+                        "secondary_qty": sec_qty,
                         "product_id": prod_id,
                         "line_note": note_str
                     })

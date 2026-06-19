@@ -710,6 +710,7 @@ def api_orders_edit():
         for line in lines:
             line_id = line.get('id')
             qty = line.get('qty')
+            sec_qty = line.get('secondary_qty')
             prod_id = line.get('product_id')
             note = line.get('line_note')
             
@@ -734,12 +735,36 @@ def api_orders_edit():
                 if qty is not None:
                     updates.append("quantity_cs = %s")
                     params.append(qty)
+                    if sec_qty is None:
+                        updates.append("quantity = %s")
+                        params.append(float(qty) * pqpc)
+                        
+                if sec_qty is not None:
                     updates.append("quantity = %s")
-                    params.append(float(qty) * pqpc)
+                    params.append(sec_qty)
                     
                 if prod_id is not None:
                     updates.append("product_id = %s")
                     params.append(prod_id)
+                    
+                    # Fetch the new product's base price
+                    cur.execute("SELECT price FROM products WHERE id = %s", (prod_id,))
+                    prow = cur.fetchone()
+                    new_price = float(prow[0]) if prow and prow[0] is not None else 0.0
+                    
+                    # Resolve customer-specific price from SQL Server
+                    cur.execute("SELECT customer_id FROM orders WHERE id = %s", (line_id,))
+                    crow = cur.fetchone()
+                    cust_id = crow[0] if crow else None
+                    if cust_id:
+                        try:
+                            new_price = _get_mssql_customer_price(cust_id, prod_id, new_price)
+                        except Exception as pe:
+                            log.warning(f"Failed to fetch customer price for product edit: {pe}")
+                            
+                    updates.append("unit_price = %s")
+                    params.append(new_price)
+                    
                 if note is not None:
                     updates.append("line_note = %s")
                     params.append(note)
@@ -989,8 +1014,15 @@ def api_products():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT id, name, sku, price FROM products ORDER BY name ASC")
-        prods = [{'id': r[0], 'name': r[1], 'sku': r[2], 'price': r[3]} for r in cur.fetchall()]
+        cur.execute("SELECT id, name, sku, price, qty_per_case, uom FROM products ORDER BY name ASC")
+        prods = [{
+            'id': r[0], 
+            'name': r[1], 
+            'sku': r[2], 
+            'price': float(r[3]) if r[3] is not None else 0.0,
+            'qty_per_case': float(r[4]) if r[4] is not None else 1.0,
+            'uom': r[5] or 'EA'
+        } for r in cur.fetchall()]
         cur.close()
         conn.close()
         return jsonify(prods)
