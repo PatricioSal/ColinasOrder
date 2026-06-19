@@ -6,5 +6,5 @@
 :: ============================================================
 
 title WhatsApp Order Bot
-cd /d "%~dp0"
+cd /d "%~dp0.."
 py src\dashboard.py

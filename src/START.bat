@@ -6,8 +6,8 @@
 
 title WhatsApp Order Bot — Launcher
 
-:: Change to the folder where this script lives (works from any location)
-cd /d "%~dp0"
+:: Change to the repository root folder
+cd /d "%~dp0.."
 
 echo.
 echo  ============================================================
