@@ -67,6 +67,8 @@ class App(ctk.CTk):
         # State
         self._connected       = False
         self._paused_log      = False
+        self._auto_replies_paused = False
+        self._auto_reply_btn  = None
         self._group_vars      = {}     # group_name -> ctk.BooleanVar
         self._group_cbs       = []     # list of CTkCheckBox widgets
         self._refresh_ctr     = 0
@@ -324,6 +326,20 @@ class App(ctk.CTk):
                                padx=10, pady=3)
             lbl.pack(side="left", padx=3)
             self._pills[name] = lbl
+
+        # Auto reply pause toggle button
+        self._auto_reply_btn = ctk.CTkButton(
+            inner,
+            text="🤖 Auto Messages: ACTIVE",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=190, height=30,
+            fg_color=CARD, hover_color=SURFACE,
+            border_width=1, border_color=GREEN,
+            text_color=GREEN,
+            corner_radius=8,
+            command=self._toggle_auto_reply
+        )
+        self._auto_reply_btn.pack(side="right", padx=(0, 15), pady=10)
 
         # Tabview
         tabs = ctk.CTkTabview(
@@ -1262,6 +1278,56 @@ class App(ctk.CTk):
                            ("MSSQL","mssql"),("Postgres","postgres")):
             color = GREEN if data.get(key) else ERROR
             self._pills[label].configure(text_color=color)
+
+        if "auto_replies_paused" in data:
+            self.after(0, lambda: self._update_auto_reply_btn_ui(data["auto_replies_paused"]))
+
+    def _toggle_auto_reply(self):
+        next_paused = not self._auto_replies_paused
+        if self._auto_reply_btn:
+            self._auto_reply_btn.configure(state="disabled")
+
+        def _send():
+            try:
+                resp = requests.post(f"{FLASK_URL}/api/auto_reply_status", json={"paused": next_paused}, timeout=5)
+                if resp.status_code == 200:
+                    d = resp.json()
+                    self.after(0, lambda: self._on_auto_reply_toggled(d.get("paused", next_paused)))
+                else:
+                    self.after(0, self._on_auto_reply_toggle_failed)
+            except Exception:
+                self.after(0, self._on_auto_reply_toggle_failed)
+
+        threading.Thread(target=_send, daemon=True).start()
+
+    def _on_auto_reply_toggled(self, paused):
+        self._auto_replies_paused = paused
+        self._update_auto_reply_btn_ui(paused)
+        if self._auto_reply_btn:
+            self._auto_reply_btn.configure(state="normal")
+
+    def _on_auto_reply_toggle_failed(self):
+        if self._auto_reply_btn:
+            self._auto_reply_btn.configure(state="normal")
+
+    def _update_auto_reply_btn_ui(self, paused):
+        self._auto_replies_paused = paused
+        if not self._auto_reply_btn:
+            return
+        if paused:
+            self._auto_reply_btn.configure(
+                text="⏸ Auto Messages: PAUSED",
+                text_color=WARN,
+                border_color=WARN,
+                hover_color=WARN_BG
+            )
+        else:
+            self._auto_reply_btn.configure(
+                text="🤖 Auto Messages: ACTIVE",
+                text_color=GREEN,
+                border_color=GREEN,
+                hover_color="#0e3d1c"
+            )
 
     def _fetch_data(self):
         try:
