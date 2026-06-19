@@ -1566,7 +1566,6 @@ class App(ctk.CTk):
         )
         save_btn.pack(side="right")
 
-    # ── Cleanup ───────────────────────────────────────────────────────────────
     def _on_close(self):
         self._connected = False
         for proc in (self._flask_proc, self._node_proc):
@@ -1575,6 +1574,23 @@ class App(ctk.CTk):
                     proc.terminate()
                 except Exception:
                     pass
+
+        # Wait a brief moment for processes to exit and release file handles
+        for proc in (self._flask_proc, self._node_proc):
+            if proc:
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+
+        # Clear webhook.log
+        try:
+            if LOG_FILE.exists():
+                with open(LOG_FILE, "w", encoding="utf-8") as f:
+                    f.truncate(0)
+        except Exception:
+            pass
+
         self.destroy()
 
 
