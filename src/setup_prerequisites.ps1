@@ -134,15 +134,39 @@ try {
     if ($pgService) {
         Write-Host "[OK] PostgreSQL is already installed and registered (Service: $($pgService.Name))." -ForegroundColor Green
     } else {
-        Write-Host "[ ] PostgreSQL service not found. Starting PostgreSQL installer via winget..." -ForegroundColor Yellow
-        Write-Host "    ----------------------------------------------------------------------------------" -ForegroundColor Cyan
-        Write-Host "    IMPORTANT: An interactive PostgreSQL setup window will open." -ForegroundColor Cyan
-        Write-Host "    - Choose the default installation path, components, and ports (5432)." -ForegroundColor Cyan
-        Write-Host "    - When prompted for a password, enter 'openpgpwd' (or note what you enter and update" -ForegroundColor Cyan
-        Write-Host "      your .env file with the password later)." -ForegroundColor Cyan
-        Write-Host "    ----------------------------------------------------------------------------------" -ForegroundColor Cyan
+        Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
+        Write-Host "           PostgreSQL Interactive Setup Guidance" -ForegroundColor Yellow
+        Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
+        Write-Host "The PostgreSQL database installer is about to download. Since this" -ForegroundColor Cyan
+        Write-Host "requires administrative/user configurations, a graphical window will" -ForegroundColor Cyan
+        Write-Host "open once the download is complete." -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Please follow these exact steps in the setup window:" -ForegroundColor White
+        Write-Host "  1. Click 'Next' on the Welcome screen." -ForegroundColor White
+        Write-Host "  2. Installation Directory: Keep default and click 'Next'." -ForegroundColor White
+        Write-Host "  3. Select Components: Keep all checked and click 'Next'." -ForegroundColor White
+        Write-Host "  4. Data Directory: Keep default and click 'Next'." -ForegroundColor White
+        Write-Host "  5. Password: Choose a secure password (e.g., 'openpgpwd' or a custom one)." -ForegroundColor White
+        Write-Host "     **WRITE DOWN THIS PASSWORD** - you will enter it later in this script." -ForegroundColor Yellow
+        Write-Host "  6. Port: Keep default '5432' and click 'Next'." -ForegroundColor White
+        Write-Host "  7. Advanced Options: Keep default Locale and click 'Next'." -ForegroundColor White
+        Write-Host "  8. Click 'Next' to start the installation." -ForegroundColor White
+        Write-Host "  9. Finish: Uncheck 'Launch Stack Builder' and click 'Finish'." -ForegroundColor White
+        Write-Host "----------------------------------------------------------" -ForegroundColor Yellow
+        Write-Host ""
+        
+        Read-Host "Press Enter to start downloading and open the installer..."
+        Write-Host ""
+        Write-Host "[ ] Downloading and starting PostgreSQL installer (this may take a few minutes)..." -ForegroundColor Yellow
+        
+        # Execute winget install. PowerShell will wait synchronously for it to finish.
         winget install --id PostgreSQL.PostgreSQL -e --interactive --accept-package-agreements --accept-source-agreements
-        Write-Host "[OK] PostgreSQL setup initiated/finished." -ForegroundColor Green
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[OK] PostgreSQL setup completed successfully!" -ForegroundColor Green
+        } else {
+            Write-Host "[!] PostgreSQL installer closed or failed (Exit code: $LASTEXITCODE)." -ForegroundColor Red
+        }
     }
 
     # --- 6. Set up `.env` File ---
@@ -159,6 +183,44 @@ try {
         }
     } else {
         Write-Host "[OK] .env file already exists." -ForegroundColor Green
+    }
+
+    # --- 6.1 Configure Database Credentials ---
+    Write-Host ""
+    Write-Host "----------------------------------------------------------" -ForegroundColor Cyan
+    Write-Host "            PostgreSQL Database Configuration" -ForegroundColor Cyan
+    Write-Host "----------------------------------------------------------" -ForegroundColor Cyan
+    
+    # Prompt the user for the password
+    Write-Host "Please enter the password you chose for the 'postgres' superuser" -ForegroundColor Yellow
+    Write-Host "during the PostgreSQL installation (default recommended was 'openpgpwd'):" -ForegroundColor Yellow
+    $pgPassword = Read-Host "Password"
+    if (-not $pgPassword) { $pgPassword = "openpgpwd" }
+    
+    # Dynamically update the credentials in .env
+    if (Test-Path $envPath) {
+        $content = Get-Content $envPath
+        $content = $content -replace '^DB_USER=.*', "DB_USER=postgres"
+        $content = $content -replace '^DB_PASSWORD=.*', "DB_PASSWORD=$pgPassword"
+        $content | Set-Content $envPath
+        Write-Host "[OK] Database credentials updated in .env (User: postgres)." -ForegroundColor Green
+    } else {
+        Write-Host "[x] Could not update database credentials because .env does not exist." -ForegroundColor Red
+    }
+
+    # --- 6.2 Ensure PostgreSQL Service is Running ---
+    Write-Host ""
+    Write-Host "[ ] Checking PostgreSQL service status..." -ForegroundColor Yellow
+    $pgService = Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue
+    if ($pgService) {
+        if ($pgService.Status -ne "Running") {
+            Write-Host "[ ] Starting PostgreSQL service ($($pgService.Name))..." -ForegroundColor Yellow
+            Start-Service $pgService.Name -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+        }
+        Write-Host "[OK] PostgreSQL database service is running." -ForegroundColor Green
+    } else {
+        Write-Host "[!] PostgreSQL service was not found. If you just installed it, you may need to restart the computer." -ForegroundColor Red
     }
 
     # --- 7. Install Python Dependencies ---
