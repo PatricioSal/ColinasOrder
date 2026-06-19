@@ -191,21 +191,61 @@ try {
     Write-Host "            PostgreSQL Database Configuration" -ForegroundColor Cyan
     Write-Host "----------------------------------------------------------" -ForegroundColor Cyan
     
-    # Prompt the user for the password
-    Write-Host "Please enter the password you chose for the 'postgres' superuser" -ForegroundColor Yellow
-    Write-Host "during the PostgreSQL installation (default recommended was 'openpgpwd'):" -ForegroundColor Yellow
-    $pgPassword = Read-Host "Password"
-    if (-not $pgPassword) { $pgPassword = "openpgpwd" }
-    
-    # Dynamically update the credentials in .env
+    # Check if we can parse DB_USER and DB_PASSWORD from current .env
+    $dbUser = "postgres"
+    $dbPassword = ""
     if (Test-Path $envPath) {
-        $content = Get-Content $envPath
-        $content = $content -replace '^DB_USER=.*', "DB_USER=postgres"
-        $content = $content -replace '^DB_PASSWORD=.*', "DB_PASSWORD=$pgPassword"
-        $content | Set-Content $envPath
-        Write-Host "[OK] Database credentials updated in .env (User: postgres)." -ForegroundColor Green
-    } else {
-        Write-Host "[x] Could not update database credentials because .env does not exist." -ForegroundColor Red
+        $envContent = Get-Content $envPath
+        foreach ($line in $envContent) {
+            if ($line -match '^DB_USER=(.*)') { $dbUser = $Matches[1].Trim() }
+            if ($line -match '^DB_PASSWORD=(.*)') { $dbPassword = $Matches[1].Trim() }
+        }
+    }
+
+    $dbConnectionOk = $false
+    $pyExe = Get-PythonPath
+    if ($pyExe -and $dbUser -and $dbPassword) {
+        Write-Host "[ ] Testing database connection with user '$dbUser'..." -ForegroundColor Yellow
+        $testCommand = "import psycopg2; psycopg2.connect(host='localhost', port=5432, user='$dbUser', password='$dbPassword', database='postgres').close(); print('OK')"
+        $testResult = & $pyExe -c $testCommand 2>$null
+        if ($testResult -eq "OK") {
+            $dbConnectionOk = $true
+            Write-Host "[OK] Connection to PostgreSQL successful using user '$dbUser'!" -ForegroundColor Green
+        } else {
+            Write-Host "[!] Connection failed with user '$dbUser'." -ForegroundColor Yellow
+        }
+    }
+
+    if (-not $dbConnectionOk) {
+        # Prompt the user for the password
+        Write-Host "Please enter the password for the PostgreSQL user (e.g. 'openpgpwd'):" -ForegroundColor Yellow
+        $inputUser = Read-Host "Database Username (default: $dbUser)"
+        if (-not $inputUser) { $inputUser = $dbUser }
+        
+        $inputPwd = Read-Host "Database Password"
+        if (-not $inputPwd) { $inputPwd = "openpgpwd" }
+
+        # Dynamically update the credentials in .env
+        if (Test-Path $envPath) {
+            $content = Get-Content $envPath
+            $content = $content -replace '^DB_USER=.*', "DB_USER=$inputUser"
+            $content = $content -replace '^DB_PASSWORD=.*', "DB_PASSWORD=$inputPwd"
+            $content | Set-Content $envPath
+            Write-Host "[OK] Database credentials updated in .env." -ForegroundColor Green
+            
+            if ($pyExe) {
+                Write-Host "[ ] Verifying connection with new credentials..." -ForegroundColor Yellow
+                $testCommand = "import psycopg2; psycopg2.connect(host='localhost', port=5432, user='$inputUser', password='$inputPwd', database='postgres').close(); print('OK')"
+                $testResult = & $pyExe -c $testCommand 2>$null
+                if ($testResult -eq "OK") {
+                    Write-Host "[OK] Database connection verified successfully!" -ForegroundColor Green
+                } else {
+                    Write-Host "[WARNING] Database connection test failed with the new credentials. Please double check PostgreSQL is running." -ForegroundColor Yellow
+                }
+            }
+        } else {
+            Write-Host "[x] Could not update database credentials because .env does not exist." -ForegroundColor Red
+        }
     }
 
     # --- 6.2 Ensure PostgreSQL Service is Running ---
@@ -240,12 +280,17 @@ try {
 
     # --- 8. Install Node.js Dependencies ---
     Refresh-Path
-    $npmCmd = Get-NpmPath
-    if ($npmCmd) {
+    $hasNpm = Get-Command npm -ErrorAction SilentlyContinue
+    if ($hasNpm -or (Test-Path "C:\Program Files\nodejs\npm.cmd")) {
         Write-Host "[ ] Installing Node.js dependencies from package.json..." -ForegroundColor Yellow
         Push-Location $PSScriptRoot
         $env:PUPPETEER_SKIP_DOWNLOAD = "true"
-        & $npmCmd install --no-audit --no-fund
+        if ($hasNpm) {
+            npm install --no-audit --no-fund
+        } else {
+            & "C:\Program Files\nodejs\npm.cmd" install --no-audit --no-fund
+        }
+        
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[!] npm install failed. Attempting clean install (removing package-lock.json)..." -ForegroundColor Yellow
             $lockFile = Join-Path $PSScriptRoot "package-lock.json"
@@ -256,7 +301,11 @@ try {
             if (Test-Path $nodeModules) {
                 Remove-Item -Path $nodeModules -Recurse -Force -ErrorAction SilentlyContinue
             }
-            & $npmCmd install --no-audit --no-fund
+            if ($hasNpm) {
+                npm install --no-audit --no-fund
+            } else {
+                & "C:\Program Files\nodejs\npm.cmd" install --no-audit --no-fund
+            }
         }
         $env:PUPPETEER_SKIP_DOWNLOAD = $null
         Pop-Location
