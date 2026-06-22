@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-PG_USER = os.getenv("DB_USER", "openpg")
+PG_USER = os.getenv("DB_USER", "postgres")
 PG_PWD = os.getenv("DB_PASSWORD", "openpgpwd")
 PG_HOST = os.getenv("DB_HOST", "localhost")
 PG_PORT = int(os.getenv("DB_PORT", "5432"))
@@ -245,6 +245,15 @@ if __name__ == "__main__":
         database="whatsapp_orders"
     )
     create_tables(conn)
-    sync_data(conn)
+    
+    # MSSQL sync is optional — don't crash setup if ODBC driver is missing or server is unreachable
+    try:
+        sync_data(conn)
+        print("Database sync completed successfully!")
+    except Exception as e:
+        print(f"\n[WARNING] Remote SQL Server sync skipped: {e}")
+        print("  The app will still work. You can sync later from the dashboard settings.")
+        print("  If ODBC Driver is not installed, download it from:")
+        print("  https://go.microsoft.com/fwlink/?linkid=2266337")
+    
     conn.close()
-    print("Database sync completed successfully!")

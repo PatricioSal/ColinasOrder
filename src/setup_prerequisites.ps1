@@ -20,26 +20,42 @@ function Refresh-Path {
 
 # Helper to find Python executable
 function Get-PythonPath {
-    $cmd = Get-Command py -ErrorAction SilentlyContinue
-    if ($cmd) { return "py" }
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($cmd) { return "python" }
+    # IMPORTANT: We must actually RUN python to check, because Windows 10/11
+    # has fake "app aliases" (python.exe, python3.exe) that point to the
+    # Microsoft Store and fool Get-Command / where.exe.
 
-    # Fallback to local app data installation
+    # Try 'py' launcher first
+    try {
+        $result = & py --version 2>&1
+        if ($LASTEXITCODE -eq 0 -and $result -match 'Python 3') { return "py" }
+    } catch {}
+
+    # Try 'python' on PATH (but verify it actually runs)
+    try {
+        $result = & python --version 2>&1
+        if ($LASTEXITCODE -eq 0 -and $result -match 'Python 3') { return "python" }
+    } catch {}
+
+    # Fallback: search common install directories
     $localAppData = [System.Environment]::GetFolderPath("LocalApplicationData")
-    $pyPath = Get-ChildItem -Path "$localAppData\Programs\Python" -Filter "Python3*" -ErrorAction SilentlyContinue | 
-              Sort-Object Name -Descending | Select-Object -First 1
-    if ($pyPath) {
-        $exe = Join-Path $pyPath.FullName "python.exe"
-        if (Test-Path $exe) { return $exe }
-    }
-    
-    # Fallback to Program Files
-    $programFilesPy = Get-ChildItem -Path "C:\Program Files\Python3*" -ErrorAction SilentlyContinue | 
-                      Sort-Object Name -Descending | Select-Object -First 1
-    if ($programFilesPy) {
-        $exe = Join-Path $programFilesPy.FullName "python.exe"
-        if (Test-Path $exe) { return $exe }
+    $searchPaths = @(
+        "$localAppData\Programs\Python",
+        "C:\Program Files\Python3*",
+        "C:\Python3*"
+    )
+    foreach ($basePath in $searchPaths) {
+        $pyDirs = Get-ChildItem -Path $basePath -Filter "Python3*" -Directory -ErrorAction SilentlyContinue |
+                  Sort-Object Name -Descending
+        foreach ($d in $pyDirs) {
+            $exe = Join-Path $d.FullName "python.exe"
+            if (Test-Path $exe) {
+                # Verify it actually works
+                try {
+                    $result = & $exe --version 2>&1
+                    if ($LASTEXITCODE -eq 0) { return $exe }
+                } catch {}
+            }
+        }
     }
 
     return $null
@@ -73,18 +89,49 @@ try {
         exit
     }
 
-    # --- 2. Check/Install Python ---
+    # --- 2. Disable Windows Store app aliases for Python ---
+    # These fake stubs fool 'where python' and prevent real Python from running
+    Write-Host "[ ] Disabling Windows Store Python app aliases..." -ForegroundColor Yellow
+    $aliasDir = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+    foreach ($alias in @("python.exe", "python3.exe")) {
+        $aliasPath = Join-Path $aliasDir $alias
+        if (Test-Path $aliasPath) {
+            try {
+                Remove-Item $aliasPath -Force -ErrorAction Stop
+                Write-Host "    Removed app alias: $alias" -ForegroundColor Cyan
+            } catch {
+                Write-Host "    Could not remove $alias alias (non-critical)." -ForegroundColor Yellow
+            }
+        }
+    }
+
+    # --- 3. Check/Install Python ---
     Refresh-Path
     $pyExe = Get-PythonPath
     if ($pyExe) {
-        Write-Host "[OK] Python is already installed." -ForegroundColor Green
+        Write-Host "[OK] Python is already installed ($pyExe)." -ForegroundColor Green
     } else {
         Write-Host "[ ] Python not detected. Installing via winget..." -ForegroundColor Yellow
         winget install --id Python.Python.3.12 -e --silent --accept-package-agreements --accept-source-agreements
+        
+        # Add Python to PATH immediately so it's available for the rest of this script
+        $localAppData = [System.Environment]::GetFolderPath("LocalApplicationData")
+        $pyDir = Get-ChildItem -Path "$localAppData\Programs\Python" -Filter "Python3*" -Directory -ErrorAction SilentlyContinue |
+                 Sort-Object Name -Descending | Select-Object -First 1
+        if ($pyDir) {
+            $pyBin = $pyDir.FullName
+            $pyScripts = Join-Path $pyBin "Scripts"
+            $currentPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+            if ($currentPath -notlike "*$pyBin*") {
+                [System.Environment]::SetEnvironmentVariable("Path", "$pyBin;$pyScripts;$currentPath", "User")
+                Write-Host "    Added Python to user PATH." -ForegroundColor Cyan
+            }
+        }
+        
         Refresh-Path
         $pyExe = Get-PythonPath
         if ($pyExe) {
-            Write-Host "[OK] Python installed successfully!" -ForegroundColor Green
+            Write-Host "[OK] Python installed successfully ($pyExe)!" -ForegroundColor Green
         } else {
             Write-Host "[!] Python installation could not be completed automatically. Please download it from https://www.python.org/downloads/." -ForegroundColor Red
         }
@@ -124,10 +171,49 @@ try {
         }
     }
 
-    # --- 4. Check/Install ODBC Driver 18 for SQL Server ---
-    Write-Host "[ ] Ensuring ODBC Driver 18 for SQL Server is installed..." -ForegroundColor Yellow
-    winget install --id Microsoft.ODBCDriverForSQLServer -e --silent --accept-package-agreements --accept-source-agreements
-    Write-Host "[OK] ODBC Driver 18 checked/installed." -ForegroundColor Green
+    # --- 4. Check/Install ODBC Driver for SQL Server ---
+    # Detect if any ODBC driver for SQL Server is already installed
+    $installedDriver = Get-OdbcDriver -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*SQL Server*' -and $_.Name -match 'ODBC Driver \d+' } | Sort-Object Name -Descending | Select-Object -First 1
+    if ($installedDriver) {
+        Write-Host "[OK] $($installedDriver.Name) is already installed." -ForegroundColor Green
+    } else {
+        Write-Host "[ ] ODBC Driver for SQL Server not found. Installing..." -ForegroundColor Yellow
+        # Try Driver 18 first, then Driver 17
+        $installed = $false
+        foreach ($driverId in @('Microsoft.ODBCDriver18ForSQLServer', 'Microsoft.ODBCDriver17ForSQLServer')) {
+            Write-Host "    Trying winget ID: $driverId ..." -ForegroundColor Cyan
+            winget install --id $driverId -e --silent --accept-package-agreements --accept-source-agreements 2>$null
+            if ($LASTEXITCODE -eq 0) { $installed = $true; break }
+        }
+        if (-not $installed) {
+            Write-Host "    Winget install failed. Downloading ODBC Driver 18 directly..." -ForegroundColor Yellow
+            $msiUrl = "https://go.microsoft.com/fwlink/?linkid=2266337"
+            $msiPath = Join-Path $env:TEMP "msodbcsql18.msi"
+            try {
+                Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+                Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /passive /norestart IACCEPTMSODBCSQLLICENSETERMS=YES" -Wait
+                Write-Host "[OK] ODBC Driver installed from direct download." -ForegroundColor Green
+            } catch {
+                Write-Host "[!] Could not install ODBC Driver automatically. Please download from:" -ForegroundColor Red
+                Write-Host "    https://go.microsoft.com/fwlink/?linkid=2266337" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "[OK] ODBC Driver installed via winget." -ForegroundColor Green
+        }
+        $installedDriver = Get-OdbcDriver -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*SQL Server*' -and $_.Name -match 'ODBC Driver \d+' } | Sort-Object Name -Descending | Select-Object -First 1
+    }
+
+    # Auto-update .env to match whichever ODBC driver version is installed
+    $repoRoot = Split-Path $PSScriptRoot -Parent
+    $envPath = Join-Path $repoRoot ".env"
+    if ($installedDriver -and (Test-Path $envPath)) {
+        $driverName = $installedDriver.Name
+        Write-Host "[ ] Updating .env to use '$driverName'..." -ForegroundColor Yellow
+        $content = Get-Content $envPath -Raw
+        $content = $content -replace 'ODBC Driver \d+ for SQL Server', $driverName
+        Set-Content $envPath $content -NoNewline
+        Write-Host "[OK] .env updated to use $driverName." -ForegroundColor Green
+    }
 
     # --- 5. Check/Install PostgreSQL ---
     $pgService = Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue
