@@ -202,7 +202,8 @@ class App(ctk.CTk):
             self.after(0, self._show_dashboard)
 
         except Exception as exc:
-            self.after(0, lambda: self._connect_failed(str(exc)))
+            err_msg = str(exc)
+            self.after(0, lambda m=err_msg: self._connect_failed(m))
 
     def _connect_failed(self, msg: str):
         self._conn_btn.configure(state="normal", text="Connect to SQL Server")
