@@ -200,6 +200,7 @@ def sync_data(pg_conn):
     SELECT TOP 1500
       so.CustomerID,
       sod.MaterialID,
+      sod.QuantityCs,
       sod.Quantity,
       so.DateIssued,
       sod.Notes
@@ -213,17 +214,18 @@ def sync_data(pg_conn):
     
     count_ord = 0
     for row in orders:
-        cid, pid, qty, date_issued, notes = row
-        qty_val = float(qty) if qty else 1.0
+        cid, pid, qty_cs, qty_lbs, date_issued, notes = row
+        qty_cs_val = float(qty_cs) if qty_cs else 0.0
+        qty_lbs_val = float(qty_lbs) if qty_lbs else 0.0
         special_instr = notes if notes else ""
         date_val = date_issued if date_issued else "NOW()"
         
         pg_cur.execute(
             """
-            INSERT INTO orders (customer_id, product_id, quantity, raw_message, source, status, special_instructions, created_at, needs_review)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO orders (customer_id, product_id, quantity_cs, quantity, raw_message, source, status, special_instructions, created_at, needs_review)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (cid, pid, qty_val, "Imported from historical sales orders", "sales_order", "completed", special_instr, date_val, False)
+            (cid, pid, qty_cs_val, qty_lbs_val, "Imported from historical sales orders", "sales_order", "completed", special_instr, date_val, False)
         )
         count_ord += 1
         
