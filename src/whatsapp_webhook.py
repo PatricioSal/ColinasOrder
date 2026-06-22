@@ -260,27 +260,15 @@ def process_order(sender_name: str, sender_phone: str, text: str, chat_id: str) 
             
             ordered_qty = float(item['qty'])
             
-            # Figure out real quantity based on UM
-            if 'LB' in product_uom.upper() or 'POUND' in product_uom.upper():
-                # If they ordered by CASE, calculate pounds
-                if item.get('uom', '').upper() in ['CASE', 'CASES', 'CS', 'CSE']:
-                    cases = ordered_qty
-                    real_qty = cases * qty_per_case
-                else:
-                    # They ordered directly by LBS, so that's the real qty
-                    real_qty = ordered_qty
-                    cases = real_qty / qty_per_case if qty_per_case > 0 else 0
-                
-                price_multiplier = real_qty
-            else:
-                # If they ordered by piece or case, price is usually per case/piece
-                cases = ordered_qty
-                real_qty = cases * qty_per_case
-                price_multiplier = cases
+            # Cases is the primary quantity the customer orders
+            # Lbs = cases × lbs_per_case (informational)
+            cases = ordered_qty
+            real_qty = cases * qty_per_case
+            price_multiplier = cases
                 
             true_price = _get_mssql_customer_price(customer['id'], product['id'], float(product['price']))
 
-            log.info(f"    -> {product['name']} (SKU: {product['sku']}, ${true_price:.2f}) [Cases: {cases}, RealQty: {real_qty}]")
+            log.info(f"    -> {product['name']} (SKU: {product['sku']}, ${true_price:.2f}) [Cases: {cases}, Lbs: {real_qty}]")
             order_lines.append({
                 "product_id": product['id'],
                 "item_name":  product['name'],
