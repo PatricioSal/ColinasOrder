@@ -609,7 +609,7 @@ def get_customer_history(conn, customer_id, sql_audit):
     cur = conn.cursor()
     query = """
     SELECT DISTINCT ON (p.id)
-           p.id, p.name, p.sku, p.price, p.description
+           p.id, p.name, p.sku, p.price, p.description, p.qty_per_case, p.uom
     FROM orders o
     JOIN products p ON o.product_id = p.id
     WHERE o.customer_id = %s
