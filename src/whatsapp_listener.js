@@ -200,11 +200,11 @@ client.on('message', async (msg) => {
             pdf_name:     pdfName
         }, { timeout: 30000 });
 
-        // Python may return a reply string
+        // Auto-replies DISABLED to avoid WhatsApp account restrictions.
+        // Orders are still processed and saved — review them on the dashboard.
         const reply = resp.data?.reply;
         if (reply && typeof reply === 'string' && reply.trim()) {
-            await msg.reply(reply);
-            console.log(`   ↳ Reply sent: "${reply.slice(0, 60)}${reply.length > 60 ? '...' : ''}"`);
+            console.log(`   ↳ [NO-REPLY] Order processed (reply suppressed): "${reply.slice(0, 80)}..."`);
         }
     } catch (err) {
         console.error('   ✗ Failed to POST to Python:', err.message);

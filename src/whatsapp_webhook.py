@@ -40,33 +40,10 @@ load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 FLASK_PORT       = 5050          # Must match PYTHON_WEBHOOK port in whatsapp_listener.js
-NODE_SEND_URL    = 'http://localhost:3000/send'   # Node.js /send endpoint
 PUSH_TO_MSSQL    = os.getenv("PUSH_TO_MSSQL", "False").lower() in ("true", "1", "yes")
 
 # ── SQL Server connection string (shared by webhook + dashboard login) ────────
 MSSQL_CONN_STR = os.getenv("MSSQL_CONN_STR", "")
-
-# ── Auto replies state persistence ────────────────────────────────────────────
-STATE_FILE = os.path.join(os.path.dirname(__file__), 'auto_replies_state.json')
-
-def load_auto_reply_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, 'r') as f:
-                data = json.load(f)
-                return data.get('paused', False)
-        except Exception:
-            pass
-    return False
-
-def save_auto_reply_state(paused):
-    try:
-        with open(STATE_FILE, 'w') as f:
-            json.dump({'paused': paused}, f)
-    except Exception as e:
-        log.error(f"Failed to save auto reply state: {e}")
-
-AUTO_REPLIES_PAUSED = load_auto_reply_state()
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -85,21 +62,9 @@ log = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'wa-order-bot-secret-2024')
 
-# Bot reply prefixes — prevent processing our own replies
-BOT_REPLY_PREFIXES = (
-    "Draft Sales Order",
-    "Order draft processed",
-    "Order received but failed",
-    "Thank you for your message",
-)
-
-def send_whatsapp(chat_id: str, message: str):
-    """Send a WhatsApp message via Node.js listener."""
-    try:
-        resp = requests.post(NODE_SEND_URL, json={"chat_id": chat_id, "message": message}, timeout=10)
-        resp.raise_for_status()
-    except Exception as e:
-        log.error(f"Failed to send WhatsApp reply: {e}")
+# ── Listen-only mode ──────────────────────────────────────────────────────────
+# Auto-replies are permanently disabled to avoid WhatsApp account restrictions.
+# The bot only receives and processes orders — no outbound messages are sent.
 
 # ── Webhook Endpoint ──────────────────────────────────────────────────────────
 @app.route('/webhook', methods=['POST'])
@@ -139,27 +104,15 @@ def webhook():
     if not body:
         return jsonify({"ok": True, "reply": None})
 
-    # Skip bot's own replies
-    if any(body.startswith(p) for p in BOT_REPLY_PREFIXES):
-        log.info(f"[SKIP] Bot reply loop prevented: '{body[:60]}'")
-        return jsonify({"ok": True, "reply": None})
-
     log.info(f"[WEBHOOK] From '{sender_name}' ({sender_phone}): \"{body}\"")
 
     try:
-        reply = process_order(sender_name, sender_phone, body, chat_id)
-        if AUTO_REPLIES_PAUSED:
-            safe_reply_preview = reply[:60].encode('ascii', errors='replace').decode('ascii')
-            log.info(f"[PAUSED] Suppressing auto-reply (order saved locally): '{safe_reply_preview}...'")
-            reply = None
-        return jsonify({"ok": True, "reply": reply})
+        process_order(sender_name, sender_phone, body, chat_id)
+        log.info(f"[LISTEN-ONLY] Order processed and saved. No reply sent.")
+        return jsonify({"ok": True, "reply": None})
     except Exception as e:
         log.exception(f"[ERROR] process_order failed: {e}")
-        error_reply = "Sorry, there was an error processing your order. Please contact the sales team."
-        if AUTO_REPLIES_PAUSED:
-            log.info(f"[PAUSED] Suppressing error auto-reply.")
-            error_reply = None
-        return jsonify({"ok": False, "reply": error_reply})
+        return jsonify({"ok": False, "reply": None})
 
 def _get_mssql_customer_price(mssql_customer_id, mssql_material_id, fallback_price):
     ms = None
@@ -888,7 +841,7 @@ def api_qr():
 @app.route('/api/status')
 def api_status():
     """Live health check for all four services."""
-    result = {'flask': True, 'node': False, 'mssql': False, 'postgres': False, 'auto_replies_paused': AUTO_REPLIES_PAUSED}
+    result = {'flask': True, 'node': False, 'mssql': False, 'postgres': False}
     try:
         r = requests.get('http://localhost:3000/status', timeout=5)
         result['node'] = r.status_code == 200
@@ -917,18 +870,7 @@ def api_status():
     return jsonify(result)
 
 
-@app.route('/api/auto_reply_status', methods=['GET', 'POST'])
-def api_auto_reply_status():
-    global AUTO_REPLIES_PAUSED
-    if request.method == 'POST':
-        data = request.get_json(force=True, silent=True) or {}
-        paused = data.get('paused', False)
-        AUTO_REPLIES_PAUSED = paused
-        save_auto_reply_state(paused)
-        log.info(f"[CONFIG] Auto-replies paused status updated to: {paused}")
-        return jsonify({'ok': True, 'paused': AUTO_REPLIES_PAUSED})
-    else:
-        return jsonify({'ok': True, 'paused': AUTO_REPLIES_PAUSED})
+# Auto-reply toggle endpoint removed — system is permanently listen-only.
 
 
 @app.route('/api/orders')
